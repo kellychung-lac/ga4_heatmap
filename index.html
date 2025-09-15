@@ -32,17 +32,24 @@
   <script>
   // -------- utilities --------
   async function fetchGzipJSON(url){
-    const r = await fetch(url); if(!r.ok) throw new Error(`Fetch ${url}: ${r.status}`);
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`Fetch ${url}: ${r.status}`);
     const ab = await r.arrayBuffer();
-    return JSON.parse(pako.ungzip(new Uint8Array(ab), {to:"string"}));
+    const txt = pako.ungzip(new Uint8Array(ab), { to: "string" });
+    return JSON.parse(txt);
   }
-  async function fetchGzipTopoAsGeoJSON(url){
-    const r = await fetch(url); if(!r.ok) throw new Error(`Fetch ${url}: ${r.status}`);
-    const ab = await r.arrayBuffer();
-    const topo = JSON.parse(pako.ungzip(new Uint8Array(ab), {to:"string"}));
-    const key = Object.keys(topo.objects)[0];
-    return topojson.feature(topo, topo.objects[key]);
+
+  // Accepts either TopoJSON (type="Topology") or GeoJSON
+  async function fetchGzipGeoOrTopoAsGeoJSON(url){
+    const obj = await fetchGzipJSON(url);
+    if (obj && obj.type === "Topology") {
+      const key = Object.keys(obj.objects)[0];
+      return topojson.feature(obj, obj.objects[key]);
+    }
+    // already GeoJSON
+    return obj;
   }
+
   function detectCityProp(feature){
     const props = feature?.properties || {};
     const cands = ["CITY","City","city","NAME","Name","name","PLACENAME","PLACENAM"];
@@ -156,7 +163,6 @@
     if(!labelData) return;
     clearLabels();
     const markers = labelData.map(pt=>{
-      const rec = (state.metrics.data[state.campaign]||{})[pt.city] || null;
       const text = pt.city; // name only; metric shown on hover of polygon
       return L.marker([pt.lat, pt.lon], {
         icon: L.divIcon({ className:"", html:`<div class="city-label">${text}</div>` }),
@@ -181,10 +187,14 @@
       attribution: '&copy; OpenStreetMap contributors & Carto', maxZoom: 18
     }).addTo(state.map);
 
+    // Load data (same-origin paths inside your repo)
     state.metrics = await fetchGzipJSON("./data/city_metrics.json.gz");
     state.scales  = { clicks: state.metrics.ranges.clicks, conversions: state.metrics.ranges.conversions, ctr: state.metrics.ranges.ctr };
-    const geo     = await fetchGzipTopoAsGeoJSON("./data/regions.topojson.gz");
+
+    // **This works with either GeoJSON or TopoJSON inside the .gz**
+    const geo = await fetchGzipGeoOrTopoAsGeoJSON("./data/regions.topojson.gz");
     state.cityProp = detectCityProp(geo.features[0]);
+
     state.fillLayer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(state.map);
 
     // labels

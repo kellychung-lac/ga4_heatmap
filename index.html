@@ -13,8 +13,8 @@
   <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
 
-  <!-- Color helpers -->
-  <script src="https://cdn.jsdelivr.net/npm/chroma-js@2.4.2/dist/chroma.min.js"></script>
+  <!-- Chroma.js for color scales -->
+  <script src="https://cdn.jsdelivr.net/npm/chroma-js@2.4.2/chroma.min.js"></script>
 
   <style>
     html, body, #map { height: 100%; margin: 0; }
@@ -46,8 +46,7 @@
       const key = Object.keys(obj.objects)[0];
       return topojson.feature(obj, obj.objects[key]);
     }
-    // already GeoJSON
-    return obj;
+    return obj; // already GeoJSON
   }
 
   function detectCityProp(feature){
@@ -62,9 +61,8 @@
   const state = {
     campaign: "ALL",
     metric: "Clicks", // Clicks | CTR | Conversions
-    metrics: null,    // {ranges, data{camp -> city -> vals}}
-    scales: null,     // {clicks:[min,max], conversions:[min,max], ctr:[min,max]}
-    geojson: null,
+    metrics: null,
+    scales: null,
     cityProp: null,
     map: null,
     fillLayer: null,
@@ -155,7 +153,7 @@
   }
 
   // ----- LABELS -----
-  let labelData = null; // [{city, lon, lat}]
+  let labelData = null;
   function clearLabels(){
     if(state.labelLayer){ state.map.removeLayer(state.labelLayer); state.labelLayer = null; }
   }
@@ -163,7 +161,7 @@
     if(!labelData) return;
     clearLabels();
     const markers = labelData.map(pt=>{
-      const text = pt.city; // name only; metric shown on hover of polygon
+      const text = pt.city;
       return L.marker([pt.lat, pt.lon], {
         icon: L.divIcon({ className:"", html:`<div class="city-label">${text}</div>` }),
         interactive:false
@@ -171,7 +169,6 @@
     });
     state.labelLayer = L.layerGroup(markers).addTo(state.map);
 
-    // simple de-clutter: hide labels when zoomed out too far
     function toggleByZoom(){
       const z = state.map.getZoom();
       state.labelLayer.getLayers().forEach(m => m.getElement().style.display = (z>=7 ? "block":"none"));
@@ -187,21 +184,18 @@
       attribution: '&copy; OpenStreetMap contributors & Carto', maxZoom: 18
     }).addTo(state.map);
 
-    // Load data (same-origin paths inside your repo)
     state.metrics = await fetchGzipJSON("./data/city_metrics.json.gz");
     state.scales  = { clicks: state.metrics.ranges.clicks, conversions: state.metrics.ranges.conversions, ctr: state.metrics.ranges.ctr };
 
-    // **This works with either GeoJSON or TopoJSON inside the .gz**
-    const geo = await fetchGzipGeoOrTopoAsGeoJSON("./data/regions.topojson.gz");
+    // ➜ Updated path to GeoJSON gzip
+    const geo = await fetchGzipGeoOrTopoAsGeoJSON("./data/regions.geojson.gz");
     state.cityProp = detectCityProp(geo.features[0]);
 
     state.fillLayer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(state.map);
 
-    // labels
     labelData = await fetchGzipJSON("./data/city_labels.json.gz");
     updateLabels();
 
-    // controls + legend
     state.map.addControl(makeRadioControl());
     updateLegend();
   })().catch(err=>{

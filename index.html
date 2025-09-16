@@ -4,18 +4,11 @@
   <meta charset="utf-8" />
   <title>California Cities Heatmap</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-  <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-  <!-- Gzip + TopoJSON -->
   <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
-
-  <!-- Chroma.js for color scales -->
   <script src="https://cdn.jsdelivr.net/npm/chroma-js@2.4.2/chroma.min.js"></script>
-
   <style>
     html, body, #map { height: 100%; margin: 0; }
     .control-card{ background:#fff; padding:8px 10px; font:12px/1.2 Arial, sans-serif; box-shadow:0 1px 4px rgba(0,0,0,.2);}
@@ -28,9 +21,7 @@
 </head>
 <body>
   <div id="map"></div>
-
   <script>
-  // -------- utilities --------
   async function fetchGzipJSON(url){
     const r = await fetch(url);
     if (!r.ok) throw new Error(`Fetch ${url}: ${r.status}`);
@@ -38,17 +29,14 @@
     const txt = pako.ungzip(new Uint8Array(ab), { to: "string" });
     return JSON.parse(txt);
   }
-
-  // Accepts either TopoJSON (type="Topology") or GeoJSON
   async function fetchGzipGeoOrTopoAsGeoJSON(url){
     const obj = await fetchGzipJSON(url);
     if (obj && obj.type === "Topology") {
       const key = Object.keys(obj.objects)[0];
       return topojson.feature(obj, obj.objects[key]);
     }
-    return obj; // already GeoJSON
+    return obj;
   }
-
   function detectCityProp(feature){
     const props = feature?.properties || {};
     const cands = ["CITY","City","city","NAME","Name","name","PLACENAME","PLACENAM"];
@@ -57,10 +45,36 @@
     return keys.length?keys[0]:"CITY";
   }
 
-  // -------- state --------
+  // normalization must mirror Python
+  const CITY_STOPWORDS = /\b(city of|city|cdp|town|unincorporated area)\b/ig;
+  function normalizeCity(s){
+    return (s ?? "")
+      .toString()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/’/g, "'")
+      .replace(CITY_STOPWORDS, "")
+      .replace(/[^\w\s'\-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
+
+  // alias transforms to try if strict key misses
+  const ALIAS_TRANSFORMS = [
+    s => s.replace(/\bst[.]?\b/g, "saint"),
+    s => s.replace(/\bsaint\b/g, "st"),
+    s => s.replace(/\bft[.]?\b/g, "fort"),
+    s => s.replace(/\bfort\b/g, "ft"),
+    s => s.replace(/\bmt[.]?\b/g, "mount"),
+    s => s.replace(/\bmount\b/g, "mt"),
+    s => s.replace(/[-']/g, " "),    // hyphens/apostrophes → space
+    s => s.replace(/\s+/g, " ")      // collapse again
+  ];
+
   const state = {
     campaign: "ALL",
-    metric: "Clicks", // Clicks | CTR | Conversions
+    metric: "Clicks",
     metrics: null,
     scales: null,
     cityProp: null,
@@ -70,32 +84,59 @@
     legend: null
   };
 
+  let cityIndex = new Map();
+  function rebuildCityIndex(){
+    cityIndex = new Map(Object.entries(state.metrics.data[state.campaign] || {}));
+  }
+
+  function tryLookup(key){
+    // strict
+    let rec = cityIndex.get(key);
+    if (rec) return rec;
+    // alias retries
+    for (const t of ALIAS_TRANSFORMS) {
+      const k2 = t(key);
+      if (k2 !== key) {
+        rec = cityIndex.get(k2);
+        if (rec) return rec;
+      }
+    }
+    return null;
+  }
+
+  function lookupRecByPolygonCity(rawCity){
+    const key = normalizeCity(rawCity);
+    return tryLookup(key);
+  }
+
   function getScale(metric){
     const [min,max] = metric==="CTR" ? state.scales.ctr :
                       (metric==="Clicks"? state.scales.clicks : state.scales.conversions);
     const scale = chroma.scale(["#f7fbff","#08306b"]).domain([min,max]);
     return v => Number.isFinite(v) ? scale(v).hex() : "#d3d3d3";
   }
+
   function styleFeature(feat){
-    const city = feat.properties[state.cityProp];
-    const rec = (state.metrics.data[state.campaign]||{})[city] || null;
-    let cv = null;
-    if (state.metric==="Clicks") cv = rec?.val_clicks_color;
-    else if (state.metric==="CTR") cv = rec?.val_ctr_color;
-    else cv = rec?.val_conversions_color;
+    const rec = lookupRecByPolygonCity(feat.properties[state.cityProp]);
+    const cv  = state.metric==="Clicks" ? rec?.val_clicks_color
+               : state.metric==="CTR"  ? rec?.val_ctr_color
+               :                        rec?.val_conversions_color;
     const fill = getScale(state.metric)(cv);
     return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(cv)?0.75:0.25 };
   }
+
   function formatValue(rec){
     if(!rec) return "—";
-    if (state.metric==="CTR") return Number.isFinite(rec.val_ctr) ? (rec.val_ctr*100).toFixed(2)+"%" : "—";
+    if (state.metric==="CTR")    return Number.isFinite(rec.val_ctr) ? (rec.val_ctr*100).toFixed(2)+"%" : "—";
     if (state.metric==="Clicks") return Number.isFinite(rec.val_clicks) ? Math.round(rec.val_clicks).toLocaleString() : "—";
     return Number.isFinite(rec.val_conversions) ? Math.round(rec.val_conversions).toLocaleString() : "—";
   }
+
   function onEachFeature(feat, layer){
     const city = feat.properties[state.cityProp];
-    const rec = (state.metrics.data[state.campaign]||{})[city] || null;
-    layer.bindTooltip(`<b>${city}</b><br>${state.metric}: ${formatValue(rec)}`, {sticky:true, direction:"auto"});
+    const rec  = lookupRecByPolygonCity(city);
+    const label = rec?.label || city;
+    layer.bindTooltip(`<b>${label}</b><br>${state.metric}: ${formatValue(rec)}`, {sticky:true, direction:"auto"});
   }
 
   function rebuildChoropleth(){
@@ -117,8 +158,18 @@
           ${["Clicks","CTR","Conversions"].map(m=>`<label><input type="radio" name="metric" value="${m}" ${m===state.metric?"checked":""}/> ${m}</label>`).join("")}
         `;
         div.addEventListener("change", e=>{
-          if(e.target.name==="camp"){ state.campaign = e.target.value; rebuildChoropleth(); updateLabels(); }
-          if(e.target.name==="metric"){ state.metric = e.target.value; rebuildChoropleth(); updateLegend(); updateLabels(); }
+          if(e.target.name==="camp"){
+            state.campaign = e.target.value;
+            rebuildCityIndex();
+            rebuildChoropleth();
+            updateLabels();
+          }
+          if(e.target.name==="metric"){
+            state.metric = e.target.value;
+            rebuildChoropleth();
+            updateLegend();
+            updateLabels();
+          }
         });
         L.DomEvent.disableClickPropagation(div);
         L.DomEvent.disableScrollPropagation(div);
@@ -161,17 +212,18 @@
     if(!labelData) return;
     clearLabels();
     const markers = labelData.map(pt=>{
-      const text = pt.city;
       return L.marker([pt.lat, pt.lon], {
-        icon: L.divIcon({ className:"", html:`<div class="city-label">${text}</div>` }),
+        icon: L.divIcon({ className:"", html:`<div class="city-label">${pt.city}</div>` }),
         interactive:false
       });
     });
     state.labelLayer = L.layerGroup(markers).addTo(state.map);
-
     function toggleByZoom(){
       const z = state.map.getZoom();
-      state.labelLayer.getLayers().forEach(m => m.getElement().style.display = (z>=7 ? "block":"none"));
+      state.labelLayer.getLayers().forEach(m => {
+        const el = m.getElement();
+        if (el) el.style.display = (z>=7 ? "block":"none");
+      });
     }
     toggleByZoom();
     state.map.off("zoomend", toggleByZoom);
@@ -186,11 +238,10 @@
 
     state.metrics = await fetchGzipJSON("./data/city_metrics.json.gz");
     state.scales  = { clicks: state.metrics.ranges.clicks, conversions: state.metrics.ranges.conversions, ctr: state.metrics.ranges.ctr };
+    rebuildCityIndex();
 
-    // ➜ Updated path to GeoJSON gzip
     const geo = await fetchGzipGeoOrTopoAsGeoJSON("./data/regions.geojson.gz");
     state.cityProp = detectCityProp(geo.features[0]);
-
     state.fillLayer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(state.map);
 
     labelData = await fetchGzipJSON("./data/city_labels.json.gz");
@@ -198,6 +249,17 @@
 
     state.map.addControl(makeRadioControl());
     updateLegend();
+
+    // console diagnostics
+    (function debugMismatches(){
+      const keys = new Set(Object.keys(state.metrics.data[state.campaign] || {}));
+      const missing = [];
+      state.fillLayer.eachLayer(l=>{
+        const k = normalizeCity(l.feature.properties[state.cityProp]);
+        if(!keys.has(k)) missing.push(l.feature.properties[state.cityProp]);
+      });
+      if (missing.length) console.warn("Polygons with no metric (after alias attempts this should be small):", missing.slice(0,100));
+    })();
   })().catch(err=>{
     console.error(err);
     alert(err.message);

@@ -18,12 +18,12 @@
 
   <style>
     html, body, #map { height: 100%; margin: 0; }
-    .control-card{ background:#fff; padding:8px 10px; font:12px/1.2 Arial, sans-serif; box-shadow:0 1px 4px rgba(0,0,0,.2); }
-    .control-card h4{ margin:4px 0 6px; font-size:12px; }
-    .control-card label{ display:block; cursor:pointer; margin:2px 0; }
-    .legend{ background:#fff; padding:6px 8px; line-height:1.2; box-shadow:0 1px 4px rgba(0,0,0,.2); }
-    .legend .scale{ height:10px; width:160px; background:linear-gradient(to right,#f7fbff,#08306b); margin:4px 0; }
-    .city-label{ font-weight:600; font-size:12px; white-space:nowrap; text-shadow: 0 1px 2px rgba(255,255,255,.9); }
+    .control-card{ background:#fff; padding:8px 10px; font:12px/1.2 Arial, sans-serif; box-shadow:0 1px 4px rgba(0,0,0,.2);}
+    .control-card h4{ margin:4px 0 6px; font-size:12px;}
+    .control-card label{ display:block; cursor:pointer; margin:2px 0;}
+    .legend{ background:#fff; padding:6px 8px; line-height:1.2; box-shadow:0 1px 4px rgba(0,0,0,.2);}
+    .legend .scale{ height:10px; width:160px; background:linear-gradient(to right,#f7fbff,#08306b); margin:4px 0;}
+    .city-label{ font-weight:600; font-size:12px; white-space:nowrap; text-shadow: 0 1px 2px rgba(255,255,255,.9);}
   </style>
 </head>
 <body>
@@ -57,20 +57,6 @@
     return keys.length?keys[0]:"CITY";
   }
 
-  // --- JS normalizer (must mirror Python normalize_city) ---
-  const CITY_STOPWORDS = /\b(city of|city|cdp|town|unincorporated area)\b/ig;
-  function normalizeCity(s){
-    return (s ?? "")
-      .toString()
-      .normalize("NFKD")
-      .replace(/[\u0300-\u036f]/g, "")          // strip accents
-      .replace(CITY_STOPWORDS, "")
-      .replace(/[^\w\s'\-]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .toLowerCase();
-  }
-
   // -------- state --------
   const state = {
     campaign: "ALL",
@@ -81,18 +67,8 @@
     map: null,
     fillLayer: null,
     labelLayer: null,
-    legend: null,
+    legend: null
   };
-
-  // dynamic index of city_key -> record for current campaign
-  let cityIndex = new Map();
-  function rebuildCityIndex(){
-    cityIndex = new Map(Object.entries(state.metrics.data[state.campaign] || {}));
-  }
-  function lookupRecByPolygonCity(rawCity){
-    const key = normalizeCity(rawCity);
-    return cityIndex.get(key) || null;
-  }
 
   function getScale(metric){
     const [min,max] = metric==="CTR" ? state.scales.ctr :
@@ -101,7 +77,8 @@
     return v => Number.isFinite(v) ? scale(v).hex() : "#d3d3d3";
   }
   function styleFeature(feat){
-    const rec = lookupRecByPolygonCity(feat.properties[state.cityProp]);
+    const city = feat.properties[state.cityProp];
+    const rec = (state.metrics.data[state.campaign]||{})[city] || null;
     let cv = null;
     if (state.metric==="Clicks") cv = rec?.val_clicks_color;
     else if (state.metric==="CTR") cv = rec?.val_ctr_color;
@@ -117,9 +94,8 @@
   }
   function onEachFeature(feat, layer){
     const city = feat.properties[state.cityProp];
-    const rec = lookupRecByPolygonCity(city);
-    const label = rec?.label || city; // prefer nice label if provided
-    layer.bindTooltip(`<b>${label}</b><br>${state.metric}: ${formatValue(rec)}`, {sticky:true, direction:"auto"});
+    const rec = (state.metrics.data[state.campaign]||{})[city] || null;
+    layer.bindTooltip(`<b>${city}</b><br>${state.metric}: ${formatValue(rec)}`, {sticky:true, direction:"auto"});
   }
 
   function rebuildChoropleth(){
@@ -141,18 +117,8 @@
           ${["Clicks","CTR","Conversions"].map(m=>`<label><input type="radio" name="metric" value="${m}" ${m===state.metric?"checked":""}/> ${m}</label>`).join("")}
         `;
         div.addEventListener("change", e=>{
-          if(e.target.name==="camp"){
-            state.campaign = e.target.value;
-            rebuildCityIndex();
-            rebuildChoropleth();
-            updateLabels();
-          }
-          if(e.target.name==="metric"){
-            state.metric = e.target.value;
-            rebuildChoropleth();
-            updateLegend();
-            updateLabels();
-          }
+          if(e.target.name==="camp"){ state.campaign = e.target.value; rebuildChoropleth(); updateLabels(); }
+          if(e.target.name==="metric"){ state.metric = e.target.value; rebuildChoropleth(); updateLegend(); updateLabels(); }
         });
         L.DomEvent.disableClickPropagation(div);
         L.DomEvent.disableScrollPropagation(div);
@@ -195,7 +161,7 @@
     if(!labelData) return;
     clearLabels();
     const markers = labelData.map(pt=>{
-      const text = pt.city; // pretty label from GeoJSON
+      const text = pt.city;
       return L.marker([pt.lat, pt.lon], {
         icon: L.divIcon({ className:"", html:`<div class="city-label">${text}</div>` }),
         interactive:false
@@ -205,10 +171,7 @@
 
     function toggleByZoom(){
       const z = state.map.getZoom();
-      state.labelLayer.getLayers().forEach(m => {
-        const el = m.getElement();
-        if (el) el.style.display = (z>=7 ? "block":"none");
-      });
+      state.labelLayer.getLayers().forEach(m => m.getElement().style.display = (z>=7 ? "block":"none"));
     }
     toggleByZoom();
     state.map.off("zoomend", toggleByZoom);
@@ -222,13 +185,9 @@
     }).addTo(state.map);
 
     state.metrics = await fetchGzipJSON("./data/city_metrics.json.gz");
-    state.scales  = {
-      clicks:      state.metrics.ranges.clicks,
-      conversions: state.metrics.ranges.conversions,
-      ctr:         state.metrics.ranges.ctr
-    };
-    rebuildCityIndex();
+    state.scales  = { clicks: state.metrics.ranges.clicks, conversions: state.metrics.ranges.conversions, ctr: state.metrics.ranges.ctr };
 
+    // ➜ Updated path to GeoJSON gzip
     const geo = await fetchGzipGeoOrTopoAsGeoJSON("./data/regions.geojson.gz");
     state.cityProp = detectCityProp(geo.features[0]);
 
@@ -239,17 +198,6 @@
 
     state.map.addControl(makeRadioControl());
     updateLegend();
-
-    // --- optional console diagnostics for any remaining mismatches ---
-    (function debugMismatches(){
-      const keys = new Set(Object.keys(state.metrics.data[state.campaign] || {})); // already normalized keys
-      const missing = [];
-      state.fillLayer.eachLayer(l=>{
-        const key = normalizeCity(l.feature.properties[state.cityProp]);
-        if(!keys.has(key)) missing.push(l.feature.properties[state.cityProp]);
-      });
-      if (missing.length) console.warn("Polygon cities with no metrics match:", missing);
-    })();
   })().catch(err=>{
     console.error(err);
     alert(err.message);

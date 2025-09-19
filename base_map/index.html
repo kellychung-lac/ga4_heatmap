@@ -119,6 +119,7 @@
         fillLayer: null,
         labelLayer: null,
         legend: null,
+        showLabels: true, // ← NEW: toggle city labels
       };
 
       function getScale(metric) {
@@ -210,6 +211,11 @@
                     }/> ${m}</label>`
                 )
                 .join("")}
+              <hr/>
+              <h4>Labels</h4>
+              <label><input type="checkbox" name="labels" ${
+                state.showLabels ? "checked" : ""
+              }/> Show city labels</label>
             `;
 
             div.addEventListener("change", (e) => {
@@ -223,6 +229,11 @@
                 rebuildChoropleth();
                 updateLegend();
                 updateLabels();
+              }
+              if (e.target.name === "labels") {
+                state.showLabels = e.target.checked;
+                if (state.showLabels) updateLabels();
+                else clearLabels();
               }
             });
 
@@ -288,6 +299,7 @@
       function updateLabels() {
         if (!labelData) return;
         clearLabels();
+        if (!state.showLabels) return; // ← respect toggle
 
         const markers = labelData.map((pt) => {
           const text = pt.city;

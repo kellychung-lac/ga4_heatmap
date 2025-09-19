@@ -6,10 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
     <!-- Leaflet -->
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
     <!-- Gzip + TopoJSON -->
@@ -20,61 +17,24 @@
     <script src="https://cdn.jsdelivr.net/npm/chroma-js@2.4.2/chroma.min.js"></script>
 
     <style>
-      html,
-      body,
-      #map {
-        height: 100%;
-        margin: 0;
-      }
-
+      html, body, #map { height: 100%; margin: 0; }
       .control-card {
-        background: #fff;
-        padding: 8px 10px;
-        font: 12px/1.2 Arial, sans-serif;
-        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+        background: #fff; padding: 8px 10px; font: 12px/1.2 Arial, sans-serif;
+        box-shadow: 0 1px 4px rgba(0,0,0,.2);
       }
-
-      .control-card h4 {
-        margin: 4px 0 6px;
-        font-size: 12px;
-      }
-
-      .control-card label {
-        display: block;
-        cursor: pointer;
-        margin: 2px 0;
-      }
-
-      /* Keeping your existing legend styles in case you re-enable them later,
-         but nothing uses .legend now. */
-      .legend {
-        background: #fff;
-        padding: 6px 8px;
-        line-height: 1.2;
-        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-      }
-
-      .legend .scale {
-        height: 10px;
-        width: 160px;
-        background: linear-gradient(to right, #f7fbff, #08306b);
-        margin: 4px 0;
-      }
-
+      .control-card h4 { margin: 4px 0 6px; font-size: 12px; }
+      .control-card label { display: block; cursor: pointer; margin: 2px 0; }
       .city-label {
-        font-weight: 600;
-        font-size: 12px;
-        white-space: nowrap;
-        text-shadow: 0 1px 2px rgba(255, 255, 255, 0.9);
+        font-weight: 600; font-size: 12px; white-space: nowrap;
+        text-shadow: 0 1px 2px rgba(255,255,255,.9);
       }
     </style>
   </head>
-
   <body>
     <div id="map"></div>
 
     <script>
-      // -------- utilities --------
+      // ---------- utils ----------
       async function fetchGzipJSON(url) {
         const r = await fetch(url);
         if (!r.ok) throw new Error(`Fetch ${url}: ${r.status}`);
@@ -82,115 +42,129 @@
         const txt = pako.ungzip(new Uint8Array(ab), { to: "string" });
         return JSON.parse(txt);
       }
-
-      // Accepts either TopoJSON (type="Topology") or GeoJSON
       async function fetchGzipGeoOrTopoAsGeoJSON(url) {
         const obj = await fetchGzipJSON(url);
         if (obj && obj.type === "Topology") {
           const key = Object.keys(obj.objects)[0];
           return topojson.feature(obj, obj.objects[key]);
         }
-        return obj; // already GeoJSON
+        return obj;
       }
-
       function detectCityProp(feature) {
         const props = feature?.properties || {};
-        const cands = [
-          "CITY",
-          "City",
-          "city",
-          "NAME",
-          "Name",
-          "name",
-          "PLACENAME",
-          "PLACENAM",
-        ];
+        const cands = ["CITY","City","city","NAME","Name","name","PLACENAME","PLACENAM"];
         for (const k of cands) if (k in props) return k;
         const keys = Object.keys(props);
         return keys.length ? keys[0] : "CITY";
       }
+      // Normalize strings for robust matching (case, spaces, punctuation)
+      function norm(s) {
+        return String(s || "")
+          .toLowerCase()
+          .normalize("NFKD")
+          .replace(/[\u0300-\u036f]/g, "")   // accents
+          .replace(/city of /g, "")          // drop 'city of'
+          .replace(/[\s\.-]/g, "")           // spaces, dots, hyphens
+          .replace(/[^a-z]/g, "");           // keep letters
+      }
 
-      // -------- state --------
-      const LA_NAME = "Los Angeles";
-
+      // ---------- state ----------
+      const LA_CANON = "losangeles"; // normalized target
       const state = {
         campaign: "ALL",
-        metric: "Clicks", // Clicks | CTR | Conversions
+        metric: "Clicks",      // Clicks | CTR | Conversions
         includeLA: true,
         metrics: null,
-        // Two parallel scale sets (include/exclude LA) for the ACTIVE campaign
-        scales_include: null,
-        scales_exclude: null,
         cityProp: null,
         map: null,
         fillLayer: null,
         labelLayer: null,
+        // per-campaign parallel domain sets
+        scales_include: null,
+        scales_exclude: null,
+        // detected keys/names
+        laMetricsKey: null,     // the exact key in metrics (per campaign)
+        laGeoNames: new Set(),  // any GeoJSON names that map to LA
       };
 
-      // ---- domain helpers ----
+      // ---------- domains ----------
       function boundsJS(vals) {
         const s = vals.filter((v) => Number.isFinite(v));
         if (!s.length) return [0, 1];
-        let lo = Math.min(...s);
-        let hi = Math.max(...s);
+        let lo = Math.min(...s), hi = Math.max(...s);
         if (lo === hi) hi = lo + 1e-9;
         return [lo, hi];
       }
-
-      // Recompute ranges for the CURRENT campaign only (Include/Exclude LA)
-      function computeScalesForCampaign(includeLA, campaign) {
+      function campaignDomains(includeLA, campaign) {
         const bag = { clicks: [], conversions: [], ctr: [] };
         const cities = state.metrics.data[campaign] || {};
-
         for (const [city, rec] of Object.entries(cities)) {
-          if (!includeLA && city === LA_NAME) continue;
+          const isLA = norm(city) === LA_CANON || city === state.laMetricsKey;
+          if (!includeLA && isLA) continue;
           if (Number.isFinite(rec?.val_clicks_color))      bag.clicks.push(rec.val_clicks_color);
           if (Number.isFinite(rec?.val_conversions_color)) bag.conversions.push(rec.val_conversions_color);
           if (Number.isFinite(rec?.val_ctr_color))         bag.ctr.push(rec.val_ctr_color);
         }
         return {
-          clicks:      boundsJS(bag.clicks),
+          clicks: boundsJS(bag.clicks),
           conversions: boundsJS(bag.conversions),
-          ctr:         boundsJS(bag.ctr),
+          ctr: boundsJS(bag.ctr),
         };
       }
+      function refreshScalesAndLAKey() {
+        // detect the LA key present in this campaign's metrics
+        const cities = Object.keys(state.metrics.data[state.campaign] || {});
+        const exact = cities.find(c => norm(c) === LA_CANON);
+        // fallback: contains "losangeles" somewhere (handles weird tokens)
+        const fuzzy = cities.find(c => norm(c).includes(LA_CANON));
+        state.laMetricsKey = exact || fuzzy || null;
 
-      function refreshScales() {
-        state.scales_include = computeScalesForCampaign(true,  state.campaign);
-        state.scales_exclude = computeScalesForCampaign(false, state.campaign);
+        // compute domains include/exclude LA for current campaign
+        state.scales_include = campaignDomains(true,  state.campaign);
+        state.scales_exclude = campaignDomains(false, state.campaign);
+
+        console.log("LA metrics key:", state.laMetricsKey || "(not found)");
+        console.log("Active domains",
+          state.includeLA ? "(Include LA)" : "(Exclude LA)",
+          state.metric,
+          state.includeLA ? state.scales_include : state.scales_exclude
+        );
       }
-
       function getActiveScales() {
         return state.includeLA ? state.scales_include : state.scales_exclude;
       }
-
       function getScale(metric) {
         const scales = getActiveScales();
         const [min, max] =
-          metric === "CTR"
-            ? scales.ctr
-            : metric === "Clicks"
-            ? scales.clicks
-            : scales.conversions;
-
+          metric === "CTR" ? scales.ctr :
+          metric === "Clicks" ? scales.clicks : scales.conversions;
         const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
         return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
       }
 
-      // ---- map styling & tooltips ----
+      // ---------- map styling & tooltips ----------
+      function formatValue(rec) {
+        if (!rec) return "—";
+        if (state.metric === "CTR")
+          return Number.isFinite(rec.val_ctr) ? (rec.val_ctr * 100).toFixed(2) + "%" : "—";
+        if (state.metric === "Clicks")
+          return Number.isFinite(rec.val_clicks) ? Math.round(rec.val_clicks).toLocaleString() : "—";
+        return Number.isFinite(rec.val_conversions)
+          ? Math.round(rec.val_conversions).toLocaleString()
+          : "—";
+      }
+      function isLAName(name) {
+        // match against normalized name and any discovered GeoJSON variants
+        return norm(name) === LA_CANON || state.laGeoNames.has(name);
+      }
       function styleFeature(feat) {
         const city = feat.properties[state.cityProp];
-        const rec =
-          (state.metrics.data[state.campaign] || {})[city] || null;
+        const rec = (state.metrics.data[state.campaign] || {})[city] || null;
 
-        // When excluded, keep LA border visible, remove fill
-        if (!state.includeLA && city === LA_NAME) {
+        if (!state.includeLA && isLAName(city)) {
           return {
-            color: "#444",
-            weight: 1.2,
-            fillColor: "#ffffff",
-            fillOpacity: 0.0,
-            dashArray: "4,3",
+            color: "#444", weight: 1.2, dashArray: "4,3",
+            fillColor: "#ffffff", fillOpacity: 0.0
           };
         }
 
@@ -200,102 +174,69 @@
         else cv = rec?.val_conversions_color;
 
         const fill = getScale(state.metric)(cv);
-
         return {
-          color: "#000",
-          weight: 0.4,
-          fillColor: fill,
-          fillOpacity: Number.isFinite(cv) ? 0.75 : 0.25,
+          color: "#000", weight: 0.4,
+          fillColor: fill, fillOpacity: Number.isFinite(cv) ? 0.75 : 0.25,
         };
       }
-
-      function formatValue(rec) {
-        if (!rec) return "—";
-        if (state.metric === "CTR")
-          return Number.isFinite(rec.val_ctr)
-            ? (rec.val_ctr * 100).toFixed(2) + "%"
-            : "—";
-        if (state.metric === "Clicks")
-          return Number.isFinite(rec.val_clicks)
-            ? Math.round(rec.val_clicks).toLocaleString()
-            : "—";
-        return Number.isFinite(rec.val_conversions)
-          ? Math.round(rec.val_conversions).toLocaleString()
-          : "—";
-      }
-
       function onEachFeature(feat, layer) {
         const city = feat.properties[state.cityProp];
-        const rec =
-          (state.metrics.data[state.campaign] || {})[city] || null;
+        const rec  = (state.metrics.data[state.campaign] || {})[city] || null;
 
-        // Keep LA's tooltip informative even when excluded
-        if (!state.includeLA && city === LA_NAME) {
+        // record any GeoJSON variant that looks like LA (for styling later)
+        if (norm(city) === LA_CANON) state.laGeoNames.add(city);
+
+        if (!state.includeLA && isLAName(city)) {
           layer.bindTooltip(
             `<b>${city}</b><br>${state.metric}: ${formatValue(rec)}<br><i>(excluded from color scale)</i>`,
             { sticky: true, direction: "auto" }
           );
           return;
         }
-
         layer.bindTooltip(
           `<b>${city}</b><br>${state.metric}: ${formatValue(rec)}`,
           { sticky: true, direction: "auto" }
         );
       }
-
       function rebuildChoropleth() {
         if (!state.fillLayer) return;
         state.fillLayer.setStyle(styleFeature);
         state.fillLayer.eachLayer((l) => onEachFeature(l.feature, l));
+        // log current min/max so you can see the change on toggle
+        const s = getActiveScales();
+        const mm = state.metric === "CTR" ? s.ctr : state.metric === "Clicks" ? s.clicks : s.conversions;
+        console.log("Domain", state.metric, state.includeLA ? "(Include LA)" : "(Exclude LA)", mm);
       }
 
-      // ---- controls ----
+      // ---------- controls ----------
       function makeRadioControl() {
         const Control = L.Control.extend({
           options: { position: "topright" },
           onAdd: function () {
             const div = L.DomUtil.create("div", "control-card leaflet-bar");
-
             div.innerHTML = `
               <h4>Campaign</h4>
-              ${["ALL", "Display", "Search"]
-                .map(
-                  (c) =>
-                    `<label><input type="radio" name="camp" value="${c}" ${
-                      c === state.campaign ? "checked" : ""
-                    }/> ${c}</label>`
-                )
-                .join("")}
+              ${["ALL","Display","Search"].map(c =>
+                `<label><input type="radio" name="camp" value="${c}" ${c===state.campaign?"checked":""}/> ${c}</label>`
+              ).join("")}
               <hr/>
               <h4>Metric</h4>
-              ${["Clicks", "CTR", "Conversions"]
-                .map(
-                  (m) =>
-                    `<label><input type="radio" name="metric" value="${m}" ${
-                      m === state.metric ? "checked" : ""
-                    }/> ${m}</label>`
-                )
-                .join("")}
+              ${["Clicks","CTR","Conversions"].map(m =>
+                `<label><input type="radio" name="metric" value="${m}" ${m===state.metric?"checked":""}/> ${m}</label>`
+              ).join("")}
               <hr/>
               <h4>Los Angeles</h4>
               ${[
-                { label: "Include", val: "include", checked: state.includeLA },
-                { label: "Exclude", val: "exclude", checked: !state.includeLA },
-              ]
-                .map(
-                  (o) =>
-                    `<label><input type="radio" name="laMode" value="${o.val}" ${
-                      o.checked ? "checked" : ""
-                    }/> ${o.label}</label>`
-                )
-                .join("")}
+                {label:"Include", val:"include", checked: state.includeLA},
+                {label:"Exclude", val:"exclude", checked: !state.includeLA}
+              ].map(o =>
+                `<label><input type="radio" name="laMode" value="${o.val}" ${o.checked?"checked":""}/> ${o.label}</label>`
+              ).join("")}
             `;
-
             div.addEventListener("change", (e) => {
               if (e.target.name === "camp") {
                 state.campaign = e.target.value;
-                refreshScales();          // recompute domains for new campaign
+                refreshScalesAndLAKey();
                 rebuildChoropleth();
                 updateLabels();
               }
@@ -306,11 +247,11 @@
               }
               if (e.target.name === "laMode") {
                 state.includeLA = e.target.value === "include";
-                refreshScales();          // domains depend on include/exclude
+                // domains depend on include/exclude
+                refreshScalesAndLAKey();
                 rebuildChoropleth();
               }
             });
-
             L.DomEvent.disableClickPropagation(div);
             L.DomEvent.disableScrollPropagation(div);
             return div;
@@ -319,79 +260,60 @@
         return new Control();
       }
 
-      // ----- LABELS -----
+      // ---------- labels ----------
       let labelData = null;
-
       function clearLabels() {
-        if (state.labelLayer) {
-          state.map.removeLayer(state.labelLayer);
-          state.labelLayer = null;
-        }
+        if (state.labelLayer) { state.map.removeLayer(state.labelLayer); state.labelLayer = null; }
       }
-
       function updateLabels() {
         if (!labelData) return;
         clearLabels();
-
-        const markers = labelData.map((pt) => {
-          const text = pt.city;
-          return L.marker([pt.lat, pt.lon], {
-            icon: L.divIcon({
-              className: "",
-              html: `<div class="city-label">${text}</div>`,
-            }),
+        const markers = labelData.map((pt) =>
+          L.marker([pt.lat, pt.lon], {
+            icon: L.divIcon({ className: "", html: `<div class="city-label">${pt.city}</div>` }),
             interactive: false,
-          });
-        });
-
+          })
+        );
         state.labelLayer = L.layerGroup(markers).addTo(state.map);
-
         function toggleByZoom() {
           const z = state.map.getZoom();
-          state.labelLayer
-            .getLayers()
-            .forEach(
-              (m) =>
-                (m.getElement().style.display = z >= 7 ? "block" : "none")
-            );
+          state.labelLayer.getLayers().forEach(
+            (m) => (m.getElement().style.display = z >= 7 ? "block" : "none")
+          );
         }
-
         toggleByZoom();
         state.map.off("zoomend", toggleByZoom);
         state.map.on("zoomend", toggleByZoom);
       }
 
-      // ---- boot ----
+      // ---------- boot ----------
       (async function main() {
         state.map = L.map("map").setView([36.7783, -119.4179], 6);
-
         L.tileLayer(
           "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png",
-          {
-            attribution: "&copy; OpenStreetMap contributors & Carto",
-            maxZoom: 18,
-          }
+          { attribution: "&copy; OpenStreetMap contributors & Carto", maxZoom: 18 }
         ).addTo(state.map);
 
         state.metrics = await fetchGzipJSON("./data/city_metrics.json.gz");
 
-        // Prepare domains for initial campaign with LA included/excluded
-        refreshScales();
-
-        const geo = await fetchGzipGeoOrTopoAsGeoJSON(
-          "./data/regions.geojson.gz"
-        );
+        const geo = await fetchGzipGeoOrTopoAsGeoJSON("./data/regions.geojson.gz");
         state.cityProp = detectCityProp(geo.features[0]);
 
-        state.fillLayer = L.geoJSON(geo, {
-          style: styleFeature,
-          onEachFeature,
-        }).addTo(state.map);
+        // seed LA GeoJSON names set
+        geo.features.forEach(f => {
+          const nm = f.properties[state.cityProp];
+          if (norm(nm) === LA_CANON) state.laGeoNames.add(nm);
+        });
+
+        state.fillLayer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(state.map);
 
         labelData = await fetchGzipJSON("./data/city_labels.json.gz");
         updateLabels();
 
+        // compute domains + detect LA key for initial campaign
+        refreshScalesAndLAKey();
         state.map.addControl(makeRadioControl());
+        rebuildChoropleth();
       })().catch((err) => {
         console.error(err);
         alert(err.message);
@@ -399,3 +321,4 @@
     </script>
   </body>
 </html>
+

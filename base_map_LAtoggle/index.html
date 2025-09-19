@@ -45,6 +45,8 @@
         margin: 2px 0;
       }
 
+      /* Keeping your existing legend styles in case you re-enable them later,
+         but nothing uses .legend now. */
       .legend {
         background: #fff;
         padding: 6px 8px;
@@ -114,19 +116,18 @@
       const state = {
         campaign: "ALL",
         metric: "Clicks", // Clicks | CTR | Conversions
-        includeLA: true,  // NEW
+        includeLA: true,
         metrics: null,
-        // Two parallel scale sets (include/exclude LA)
+        // Two parallel scale sets (include/exclude LA) for the ACTIVE campaign
         scales_include: null,
         scales_exclude: null,
         cityProp: null,
         map: null,
         fillLayer: null,
         labelLayer: null,
-        legend: null,
-        legendCompare: null,
       };
 
+      // ---- domain helpers ----
       function boundsJS(vals) {
         const s = vals.filter((v) => Number.isFinite(v));
         if (!s.length) return [0, 1];
@@ -136,24 +137,27 @@
         return [lo, hi];
       }
 
-      function computeScales(includeLA) {
+      // Recompute ranges for the CURRENT campaign only (Include/Exclude LA)
+      function computeScalesForCampaign(includeLA, campaign) {
         const bag = { clicks: [], conversions: [], ctr: [] };
-        for (const [, cities] of Object.entries(state.metrics.data)) {
-          for (const [city, rec] of Object.entries(cities)) {
-            if (!includeLA && city === LA_NAME) continue;
-            if (Number.isFinite(rec?.val_clicks_color))
-              bag.clicks.push(rec.val_clicks_color);
-            if (Number.isFinite(rec?.val_conversions_color))
-              bag.conversions.push(rec.val_conversions_color);
-            if (Number.isFinite(rec?.val_ctr_color))
-              bag.ctr.push(rec.val_ctr_color);
-          }
+        const cities = state.metrics.data[campaign] || {};
+
+        for (const [city, rec] of Object.entries(cities)) {
+          if (!includeLA && city === LA_NAME) continue;
+          if (Number.isFinite(rec?.val_clicks_color))      bag.clicks.push(rec.val_clicks_color);
+          if (Number.isFinite(rec?.val_conversions_color)) bag.conversions.push(rec.val_conversions_color);
+          if (Number.isFinite(rec?.val_ctr_color))         bag.ctr.push(rec.val_ctr_color);
         }
         return {
-          clicks: boundsJS(bag.clicks),
+          clicks:      boundsJS(bag.clicks),
           conversions: boundsJS(bag.conversions),
-          ctr: boundsJS(bag.ctr),
+          ctr:         boundsJS(bag.ctr),
         };
+      }
+
+      function refreshScales() {
+        state.scales_include = computeScalesForCampaign(true,  state.campaign);
+        state.scales_exclude = computeScalesForCampaign(false, state.campaign);
       }
 
       function getActiveScales() {
@@ -173,6 +177,7 @@
         return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
       }
 
+      // ---- map styling & tooltips ----
       function styleFeature(feat) {
         const city = feat.properties[state.cityProp];
         const rec =
@@ -245,6 +250,7 @@
         state.fillLayer.eachLayer((l) => onEachFeature(l.feature, l));
       }
 
+      // ---- controls ----
       function makeRadioControl() {
         const Control = L.Control.extend({
           options: { position: "topright" },
@@ -289,19 +295,19 @@
             div.addEventListener("change", (e) => {
               if (e.target.name === "camp") {
                 state.campaign = e.target.value;
+                refreshScales();          // recompute domains for new campaign
                 rebuildChoropleth();
                 updateLabels();
               }
               if (e.target.name === "metric") {
                 state.metric = e.target.value;
                 rebuildChoropleth();
-                updateLegends();
                 updateLabels();
               }
               if (e.target.name === "laMode") {
                 state.includeLA = e.target.value === "include";
+                refreshScales();          // domains depend on include/exclude
                 rebuildChoropleth();
-                updateLegends();
               }
             });
 
@@ -311,71 +317,6 @@
           },
         });
         return new Control();
-      }
-
-      // ----- Legends (same styling; two boxes for comparison) -----
-      function ensureLegends() {
-        if (!state.legend) {
-          const Legend = L.Control.extend({
-            options: { position: "bottomright" },
-            onAdd: function () {
-              const div = L.DomUtil.create("div", "legend leaflet-bar");
-              div.innerHTML = `
-                <div><b id="legend-title-active"></b> <span style="opacity:.7">(active)</span></div>
-                <div class="scale"></div>
-                <div><span id="legend-min-active"></span> – <span id="legend-max-active"></span></div>
-              `;
-              return div;
-            },
-          });
-          state.legend = new Legend();
-          state.map.addControl(state.legend);
-        }
-
-        if (!state.legendCompare) {
-          const Legend2 = L.Control.extend({
-            options: { position: "bottomright" },
-            onAdd: function () {
-              const div = L.DomUtil.create("div", "legend leaflet-bar");
-              div.style.marginTop = "6px";
-              div.innerHTML = `
-                <div><b id="legend-title-compare"></b></div>
-                <div class="scale"></div>
-                <div><span id="legend-min-compare"></span> – <span id="legend-max-compare"></span></div>
-              `;
-              return div;
-            },
-          });
-          state.legendCompare = new Legend2();
-          state.map.addControl(state.legendCompare);
-        }
-      }
-
-      function updateLegends() {
-        ensureLegends();
-
-        const activeScales  = state.includeLA ? state.scales_include : state.scales_exclude;
-        const otherScales   = state.includeLA ? state.scales_exclude : state.scales_include;
-
-        const pick = (sc) =>
-          state.metric === "CTR" ? sc.ctr : state.metric === "Clicks" ? sc.clicks : sc.conversions;
-
-        const [amin, amax] = pick(activeScales);
-        const [cmin, cmax] = pick(otherScales);
-
-        const titleActive  = `${state.metric} ${state.metric === "CTR" ? "" : "(log-scaled)"} — ${state.includeLA ? "Include LA" : "Exclude LA"}`;
-        const titleCompare = `${state.metric} ${state.metric === "CTR" ? "" : "(log-scaled)"} — ${state.includeLA ? "Exclude LA" : "Include LA"}`;
-
-        const fmt = (v, isCTR) => (isCTR ? (v * 100).toFixed(1) + "%" : v.toFixed(2));
-        const isCTR = state.metric === "CTR";
-
-        document.getElementById("legend-title-active").textContent  = titleActive;
-        document.getElementById("legend-title-compare").textContent = titleCompare;
-
-        document.getElementById("legend-min-active").textContent  = fmt(amin, isCTR);
-        document.getElementById("legend-max-active").textContent  = fmt(amax, isCTR);
-        document.getElementById("legend-min-compare").textContent = fmt(cmin, isCTR);
-        document.getElementById("legend-max-compare").textContent = fmt(cmax, isCTR);
       }
 
       // ----- LABELS -----
@@ -420,6 +361,7 @@
         state.map.on("zoomend", toggleByZoom);
       }
 
+      // ---- boot ----
       (async function main() {
         state.map = L.map("map").setView([36.7783, -119.4179], 6);
 
@@ -433,9 +375,8 @@
 
         state.metrics = await fetchGzipJSON("./data/city_metrics.json.gz");
 
-        // Precompute scale sets (include vs exclude LA)
-        state.scales_include = computeScales(true);
-        state.scales_exclude = computeScales(false);
+        // Prepare domains for initial campaign with LA included/excluded
+        refreshScales();
 
         const geo = await fetchGzipGeoOrTopoAsGeoJSON(
           "./data/regions.geojson.gz"
@@ -451,7 +392,6 @@
         updateLabels();
 
         state.map.addControl(makeRadioControl());
-        updateLegends();
       })().catch((err) => {
         console.error(err);
         alert(err.message);

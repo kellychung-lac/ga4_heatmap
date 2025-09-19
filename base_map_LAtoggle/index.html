@@ -83,7 +83,7 @@
         scales_include: null,
         scales_exclude: null,
         // detected keys/names
-        laMetricsKey: null,     // the exact key in metrics (per campaign)
+        laMetricsKey: null,     // exact key in metrics (for current campaign)
         laGeoNames: new Set(),  // any GeoJSON names that map to LA
       };
 
@@ -97,7 +97,7 @@
       }
       function campaignDomains(includeLA, campaign) {
         const bag = { clicks: [], conversions: [], ctr: [] };
-        const cities = state.metrics.data[campaign] || {};
+        const cities = state.metrics?.data?.[campaign] || {};
         for (const [city, rec] of Object.entries(cities)) {
           const isLA = norm(city) === LA_CANON || city === state.laMetricsKey;
           if (!includeLA && isLA) continue;
@@ -113,9 +113,8 @@
       }
       function refreshScalesAndLAKey() {
         // detect the LA key present in this campaign's metrics
-        const cities = Object.keys(state.metrics.data[state.campaign] || {});
+        const cities = Object.keys(state.metrics?.data?.[state.campaign] || {});
         const exact = cities.find(c => norm(c) === LA_CANON);
-        // fallback: contains "losangeles" somewhere (handles weird tokens)
         const fuzzy = cities.find(c => norm(c).includes(LA_CANON));
         state.laMetricsKey = exact || fuzzy || null;
 
@@ -124,17 +123,15 @@
         state.scales_exclude = campaignDomains(false, state.campaign);
 
         console.log("LA metrics key:", state.laMetricsKey || "(not found)");
-        console.log("Active domains",
-          state.includeLA ? "(Include LA)" : "(Exclude LA)",
-          state.metric,
-          state.includeLA ? state.scales_include : state.scales_exclude
-        );
+        console.log("Domains (include)", state.scales_include, " (exclude)", state.scales_exclude);
       }
       function getActiveScales() {
         return state.includeLA ? state.scales_include : state.scales_exclude;
       }
       function getScale(metric) {
         const scales = getActiveScales();
+        // Guard against early calls before scales are ready
+        if (!scales) return () => "#d3d3d3";
         const [min, max] =
           metric === "CTR" ? scales.ctr :
           metric === "Clicks" ? scales.clicks : scales.conversions;
@@ -154,12 +151,11 @@
           : "—";
       }
       function isLAName(name) {
-        // match against normalized name and any discovered GeoJSON variants
         return norm(name) === LA_CANON || state.laGeoNames.has(name);
       }
       function styleFeature(feat) {
         const city = feat.properties[state.cityProp];
-        const rec = (state.metrics.data[state.campaign] || {})[city] || null;
+        const rec = (state.metrics?.data?.[state.campaign] || {})[city] || null;
 
         if (!state.includeLA && isLAName(city)) {
           return {
@@ -181,9 +177,8 @@
       }
       function onEachFeature(feat, layer) {
         const city = feat.properties[state.cityProp];
-        const rec  = (state.metrics.data[state.campaign] || {})[city] || null;
+        const rec  = (state.metrics?.data?.[state.campaign] || {})[city] || null;
 
-        // record any GeoJSON variant that looks like LA (for styling later)
         if (norm(city) === LA_CANON) state.laGeoNames.add(city);
 
         if (!state.includeLA && isLAName(city)) {
@@ -202,10 +197,11 @@
         if (!state.fillLayer) return;
         state.fillLayer.setStyle(styleFeature);
         state.fillLayer.eachLayer((l) => onEachFeature(l.feature, l));
-        // log current min/max so you can see the change on toggle
         const s = getActiveScales();
-        const mm = state.metric === "CTR" ? s.ctr : state.metric === "Clicks" ? s.clicks : s.conversions;
-        console.log("Domain", state.metric, state.includeLA ? "(Include LA)" : "(Exclude LA)", mm);
+        if (s) {
+          const mm = state.metric === "CTR" ? s.ctr : state.metric === "Clicks" ? s.clicks : s.conversions;
+          console.log("Active domain", state.metric, state.includeLA ? "(Include LA)" : "(Exclude LA)", mm);
+        }
       }
 
       // ---------- controls ----------
@@ -247,7 +243,6 @@
               }
               if (e.target.name === "laMode") {
                 state.includeLA = e.target.value === "include";
-                // domains depend on include/exclude
                 refreshScalesAndLAKey();
                 rebuildChoropleth();
               }
@@ -294,7 +289,9 @@
           { attribution: "&copy; OpenStreetMap contributors & Carto", maxZoom: 18 }
         ).addTo(state.map);
 
+        // Load metrics first, compute scales BEFORE creating the GeoJSON layer.
         state.metrics = await fetchGzipJSON("./data/city_metrics.json.gz");
+        refreshScalesAndLAKey();
 
         const geo = await fetchGzipGeoOrTopoAsGeoJSON("./data/regions.geojson.gz");
         state.cityProp = detectCityProp(geo.features[0]);
@@ -310,8 +307,6 @@
         labelData = await fetchGzipJSON("./data/city_labels.json.gz");
         updateLabels();
 
-        // compute domains + detect LA key for initial campaign
-        refreshScalesAndLAKey();
         state.map.addControl(makeRadioControl());
         rebuildChoropleth();
       })().catch((err) => {
@@ -321,4 +316,3 @@
     </script>
   </body>
 </html>
-

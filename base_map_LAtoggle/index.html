@@ -1,0 +1,461 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>California Cities Heatmap</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- Leaflet -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Gzip + TopoJSON -->
+    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+
+    <!-- Chroma.js for color scales -->
+    <script src="https://cdn.jsdelivr.net/npm/chroma-js@2.4.2/chroma.min.js"></script>
+
+    <style>
+      html,
+      body,
+      #map {
+        height: 100%;
+        margin: 0;
+      }
+
+      .control-card {
+        background: #fff;
+        padding: 8px 10px;
+        font: 12px/1.2 Arial, sans-serif;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+      }
+
+      .control-card h4 {
+        margin: 4px 0 6px;
+        font-size: 12px;
+      }
+
+      .control-card label {
+        display: block;
+        cursor: pointer;
+        margin: 2px 0;
+      }
+
+      .legend {
+        background: #fff;
+        padding: 6px 8px;
+        line-height: 1.2;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+      }
+
+      .legend .scale {
+        height: 10px;
+        width: 160px;
+        background: linear-gradient(to right, #f7fbff, #08306b);
+        margin: 4px 0;
+      }
+
+      .city-label {
+        font-weight: 600;
+        font-size: 12px;
+        white-space: nowrap;
+        text-shadow: 0 1px 2px rgba(255, 255, 255, 0.9);
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="map"></div>
+
+    <script>
+      // -------- utilities --------
+      async function fetchGzipJSON(url) {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`Fetch ${url}: ${r.status}`);
+        const ab = await r.arrayBuffer();
+        const txt = pako.ungzip(new Uint8Array(ab), { to: "string" });
+        return JSON.parse(txt);
+      }
+
+      // Accepts either TopoJSON (type="Topology") or GeoJSON
+      async function fetchGzipGeoOrTopoAsGeoJSON(url) {
+        const obj = await fetchGzipJSON(url);
+        if (obj && obj.type === "Topology") {
+          const key = Object.keys(obj.objects)[0];
+          return topojson.feature(obj, obj.objects[key]);
+        }
+        return obj; // already GeoJSON
+      }
+
+      function detectCityProp(feature) {
+        const props = feature?.properties || {};
+        const cands = [
+          "CITY",
+          "City",
+          "city",
+          "NAME",
+          "Name",
+          "name",
+          "PLACENAME",
+          "PLACENAM",
+        ];
+        for (const k of cands) if (k in props) return k;
+        const keys = Object.keys(props);
+        return keys.length ? keys[0] : "CITY";
+      }
+
+      // -------- state --------
+      const LA_NAME = "Los Angeles";
+
+      const state = {
+        campaign: "ALL",
+        metric: "Clicks", // Clicks | CTR | Conversions
+        includeLA: true,  // NEW
+        metrics: null,
+        // Two parallel scale sets (include/exclude LA)
+        scales_include: null,
+        scales_exclude: null,
+        cityProp: null,
+        map: null,
+        fillLayer: null,
+        labelLayer: null,
+        legend: null,
+        legendCompare: null,
+      };
+
+      function boundsJS(vals) {
+        const s = vals.filter((v) => Number.isFinite(v));
+        if (!s.length) return [0, 1];
+        let lo = Math.min(...s);
+        let hi = Math.max(...s);
+        if (lo === hi) hi = lo + 1e-9;
+        return [lo, hi];
+      }
+
+      function computeScales(includeLA) {
+        const bag = { clicks: [], conversions: [], ctr: [] };
+        for (const [, cities] of Object.entries(state.metrics.data)) {
+          for (const [city, rec] of Object.entries(cities)) {
+            if (!includeLA && city === LA_NAME) continue;
+            if (Number.isFinite(rec?.val_clicks_color))
+              bag.clicks.push(rec.val_clicks_color);
+            if (Number.isFinite(rec?.val_conversions_color))
+              bag.conversions.push(rec.val_conversions_color);
+            if (Number.isFinite(rec?.val_ctr_color))
+              bag.ctr.push(rec.val_ctr_color);
+          }
+        }
+        return {
+          clicks: boundsJS(bag.clicks),
+          conversions: boundsJS(bag.conversions),
+          ctr: boundsJS(bag.ctr),
+        };
+      }
+
+      function getActiveScales() {
+        return state.includeLA ? state.scales_include : state.scales_exclude;
+      }
+
+      function getScale(metric) {
+        const scales = getActiveScales();
+        const [min, max] =
+          metric === "CTR"
+            ? scales.ctr
+            : metric === "Clicks"
+            ? scales.clicks
+            : scales.conversions;
+
+        const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
+        return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
+      }
+
+      function styleFeature(feat) {
+        const city = feat.properties[state.cityProp];
+        const rec =
+          (state.metrics.data[state.campaign] || {})[city] || null;
+
+        // When excluded, keep LA border visible, remove fill
+        if (!state.includeLA && city === LA_NAME) {
+          return {
+            color: "#444",
+            weight: 1.2,
+            fillColor: "#ffffff",
+            fillOpacity: 0.0,
+            dashArray: "4,3",
+          };
+        }
+
+        let cv = null;
+        if (state.metric === "Clicks") cv = rec?.val_clicks_color;
+        else if (state.metric === "CTR") cv = rec?.val_ctr_color;
+        else cv = rec?.val_conversions_color;
+
+        const fill = getScale(state.metric)(cv);
+
+        return {
+          color: "#000",
+          weight: 0.4,
+          fillColor: fill,
+          fillOpacity: Number.isFinite(cv) ? 0.75 : 0.25,
+        };
+      }
+
+      function formatValue(rec) {
+        if (!rec) return "—";
+        if (state.metric === "CTR")
+          return Number.isFinite(rec.val_ctr)
+            ? (rec.val_ctr * 100).toFixed(2) + "%"
+            : "—";
+        if (state.metric === "Clicks")
+          return Number.isFinite(rec.val_clicks)
+            ? Math.round(rec.val_clicks).toLocaleString()
+            : "—";
+        return Number.isFinite(rec.val_conversions)
+          ? Math.round(rec.val_conversions).toLocaleString()
+          : "—";
+      }
+
+      function onEachFeature(feat, layer) {
+        const city = feat.properties[state.cityProp];
+        const rec =
+          (state.metrics.data[state.campaign] || {})[city] || null;
+
+        // Keep LA's tooltip informative even when excluded
+        if (!state.includeLA && city === LA_NAME) {
+          layer.bindTooltip(
+            `<b>${city}</b><br>${state.metric}: ${formatValue(rec)}<br><i>(excluded from color scale)</i>`,
+            { sticky: true, direction: "auto" }
+          );
+          return;
+        }
+
+        layer.bindTooltip(
+          `<b>${city}</b><br>${state.metric}: ${formatValue(rec)}`,
+          { sticky: true, direction: "auto" }
+        );
+      }
+
+      function rebuildChoropleth() {
+        if (!state.fillLayer) return;
+        state.fillLayer.setStyle(styleFeature);
+        state.fillLayer.eachLayer((l) => onEachFeature(l.feature, l));
+      }
+
+      function makeRadioControl() {
+        const Control = L.Control.extend({
+          options: { position: "topright" },
+          onAdd: function () {
+            const div = L.DomUtil.create("div", "control-card leaflet-bar");
+
+            div.innerHTML = `
+              <h4>Campaign</h4>
+              ${["ALL", "Display", "Search"]
+                .map(
+                  (c) =>
+                    `<label><input type="radio" name="camp" value="${c}" ${
+                      c === state.campaign ? "checked" : ""
+                    }/> ${c}</label>`
+                )
+                .join("")}
+              <hr/>
+              <h4>Metric</h4>
+              ${["Clicks", "CTR", "Conversions"]
+                .map(
+                  (m) =>
+                    `<label><input type="radio" name="metric" value="${m}" ${
+                      m === state.metric ? "checked" : ""
+                    }/> ${m}</label>`
+                )
+                .join("")}
+              <hr/>
+              <h4>Los Angeles</h4>
+              ${[
+                { label: "Include", val: "include", checked: state.includeLA },
+                { label: "Exclude", val: "exclude", checked: !state.includeLA },
+              ]
+                .map(
+                  (o) =>
+                    `<label><input type="radio" name="laMode" value="${o.val}" ${
+                      o.checked ? "checked" : ""
+                    }/> ${o.label}</label>`
+                )
+                .join("")}
+            `;
+
+            div.addEventListener("change", (e) => {
+              if (e.target.name === "camp") {
+                state.campaign = e.target.value;
+                rebuildChoropleth();
+                updateLabels();
+              }
+              if (e.target.name === "metric") {
+                state.metric = e.target.value;
+                rebuildChoropleth();
+                updateLegends();
+                updateLabels();
+              }
+              if (e.target.name === "laMode") {
+                state.includeLA = e.target.value === "include";
+                rebuildChoropleth();
+                updateLegends();
+              }
+            });
+
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
+            return div;
+          },
+        });
+        return new Control();
+      }
+
+      // ----- Legends (same styling; two boxes for comparison) -----
+      function ensureLegends() {
+        if (!state.legend) {
+          const Legend = L.Control.extend({
+            options: { position: "bottomright" },
+            onAdd: function () {
+              const div = L.DomUtil.create("div", "legend leaflet-bar");
+              div.innerHTML = `
+                <div><b id="legend-title-active"></b> <span style="opacity:.7">(active)</span></div>
+                <div class="scale"></div>
+                <div><span id="legend-min-active"></span> – <span id="legend-max-active"></span></div>
+              `;
+              return div;
+            },
+          });
+          state.legend = new Legend();
+          state.map.addControl(state.legend);
+        }
+
+        if (!state.legendCompare) {
+          const Legend2 = L.Control.extend({
+            options: { position: "bottomright" },
+            onAdd: function () {
+              const div = L.DomUtil.create("div", "legend leaflet-bar");
+              div.style.marginTop = "6px";
+              div.innerHTML = `
+                <div><b id="legend-title-compare"></b></div>
+                <div class="scale"></div>
+                <div><span id="legend-min-compare"></span> – <span id="legend-max-compare"></span></div>
+              `;
+              return div;
+            },
+          });
+          state.legendCompare = new Legend2();
+          state.map.addControl(state.legendCompare);
+        }
+      }
+
+      function updateLegends() {
+        ensureLegends();
+
+        const activeScales  = state.includeLA ? state.scales_include : state.scales_exclude;
+        const otherScales   = state.includeLA ? state.scales_exclude : state.scales_include;
+
+        const pick = (sc) =>
+          state.metric === "CTR" ? sc.ctr : state.metric === "Clicks" ? sc.clicks : sc.conversions;
+
+        const [amin, amax] = pick(activeScales);
+        const [cmin, cmax] = pick(otherScales);
+
+        const titleActive  = `${state.metric} ${state.metric === "CTR" ? "" : "(log-scaled)"} — ${state.includeLA ? "Include LA" : "Exclude LA"}`;
+        const titleCompare = `${state.metric} ${state.metric === "CTR" ? "" : "(log-scaled)"} — ${state.includeLA ? "Exclude LA" : "Include LA"}`;
+
+        const fmt = (v, isCTR) => (isCTR ? (v * 100).toFixed(1) + "%" : v.toFixed(2));
+        const isCTR = state.metric === "CTR";
+
+        document.getElementById("legend-title-active").textContent  = titleActive;
+        document.getElementById("legend-title-compare").textContent = titleCompare;
+
+        document.getElementById("legend-min-active").textContent  = fmt(amin, isCTR);
+        document.getElementById("legend-max-active").textContent  = fmt(amax, isCTR);
+        document.getElementById("legend-min-compare").textContent = fmt(cmin, isCTR);
+        document.getElementById("legend-max-compare").textContent = fmt(cmax, isCTR);
+      }
+
+      // ----- LABELS -----
+      let labelData = null;
+
+      function clearLabels() {
+        if (state.labelLayer) {
+          state.map.removeLayer(state.labelLayer);
+          state.labelLayer = null;
+        }
+      }
+
+      function updateLabels() {
+        if (!labelData) return;
+        clearLabels();
+
+        const markers = labelData.map((pt) => {
+          const text = pt.city;
+          return L.marker([pt.lat, pt.lon], {
+            icon: L.divIcon({
+              className: "",
+              html: `<div class="city-label">${text}</div>`,
+            }),
+            interactive: false,
+          });
+        });
+
+        state.labelLayer = L.layerGroup(markers).addTo(state.map);
+
+        function toggleByZoom() {
+          const z = state.map.getZoom();
+          state.labelLayer
+            .getLayers()
+            .forEach(
+              (m) =>
+                (m.getElement().style.display = z >= 7 ? "block" : "none")
+            );
+        }
+
+        toggleByZoom();
+        state.map.off("zoomend", toggleByZoom);
+        state.map.on("zoomend", toggleByZoom);
+      }
+
+      (async function main() {
+        state.map = L.map("map").setView([36.7783, -119.4179], 6);
+
+        L.tileLayer(
+          "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png",
+          {
+            attribution: "&copy; OpenStreetMap contributors & Carto",
+            maxZoom: 18,
+          }
+        ).addTo(state.map);
+
+        state.metrics = await fetchGzipJSON("./data/city_metrics.json.gz");
+
+        // Precompute scale sets (include vs exclude LA)
+        state.scales_include = computeScales(true);
+        state.scales_exclude = computeScales(false);
+
+        const geo = await fetchGzipGeoOrTopoAsGeoJSON(
+          "./data/regions.geojson.gz"
+        );
+        state.cityProp = detectCityProp(geo.features[0]);
+
+        state.fillLayer = L.geoJSON(geo, {
+          style: styleFeature,
+          onEachFeature,
+        }).addTo(state.map);
+
+        labelData = await fetchGzipJSON("./data/city_labels.json.gz");
+        updateLabels();
+
+        state.map.addControl(makeRadioControl());
+        updateLegends();
+      })().catch((err) => {
+        console.error(err);
+        alert(err.message);
+      });
+    </script>
+  </body>
+</html>

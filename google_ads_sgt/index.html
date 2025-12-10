@@ -22,6 +22,20 @@
       .inline { display:inline-block; margin-right:8px; }
       .muted { color:#666; }
       .note { margin-top:6px; font-size:11px; line-height:1.3; }
+
+      .date-row {
+        display:flex;
+        gap:4px;
+        align-items:center;
+        margin:2px 0;
+      }
+      .date-row span {
+        min-width:30px;
+      }
+      .date-row input[type="date"] {
+        font-size:11px;
+        padding:2px 3px;
+      }
     </style>
   </head>
 
@@ -60,29 +74,43 @@
         }
         return `linear-gradient(to right, ${arr.join(",")})`;
       }
+      function ensureOrdered(a, b) {
+        return a <= b ? [a, b] : [b, a];
+      }
 
       // ---------- state ----------
-      const PERIODS_ORDERED = [
-        { key:"all_2025",         label:"All 2025" },
-        { key:"jan_apr_2025",     label:"Jan–Apr 2025" },
-        { key:"may_jul_2025",     label:"May–Jul 2025" },
-        { key:"aug_present_2025", label:"Aug–Present" }
-      ];
-      // For % Difference, exclude "All 2025"
-      const PERIODS_PCT = PERIODS_ORDERED.filter(p => p.key !== "all_2025");
+      const CAMPAIGNS = ["ALL","Display","Search"];
+      const EPS = 1e-9;
+
+      // % diff gating thresholds
+      const THRESHOLDS = {
+        Clicks:       { minClicks: 25, minImpr: 100 },
+        Conversions:  { minPurch:  5, minClicks: 25 },
+        CTR:          { minClicks: 25, minImpr: 100 },
+      };
 
       const state = {
         mode: "absolute", // "absolute" | "pct"
-        period: "all_2025",
-        periodFrom: "jan_apr_2025",
-        periodTo: "may_jul_2025",
+
+        // date ranges (YYYY-MM-DD)
+        dateFromAbs: null,
+        dateToAbs:   null,
+        dateFromA:   null,
+        dateToA:     null,
+        dateFromB:   null,
+        dateToB:     null,
 
         campaign: "ALL",
-        metric: "Clicks",
+        metric: "Clicks", // "Clicks" | "Conversions" | "CTR"
 
-        periods: null,        // { periodKey: { campaign: { city: {impr_sum, val_ctr, val_clicks, val_conversions} } } }
-        metricsPeriod: null,
-        ranges: null,
+        daily: null,       // json.daily
+        meta: null,        // json.meta {min_date,max_date}
+        aggregatedAbs: null,
+        aggregatedFrom: null,
+        aggregatedTo: null,
+        pctCache: null,
+
+        ranges: null,      // abs: {clicks:[min,max], conversions:[min,max], ctr:[min,max]} or {pct:[min,max]}
         cityProp: null,
 
         map: null,
@@ -93,54 +121,65 @@
         includeLA: (localStorage.getItem("includeLA") ?? "true") === "true",
       };
 
-      // ---------- % diff gating thresholds (adjust as needed) ----------
-      const THRESHOLDS = {
-        Clicks:       { minClicks: 25,  minImpr: 100 },
-        Conversions:  { minPurch:  5,   minClicks: 25 },
-        CTR:          { minClicks: 25,  minImpr: 100 },
-      };
-      const EPS = 1e-9;
-
       function baseDir() {
         return state.includeLA ? "./data_time" : "./data_noLA_noSD_time";
       }
-      function nameWithSuf(n) {
-        return state.includeLA ? n : `${n}_noLA_noSD`;
-      }
-      function path(n, ext) {
-        return `${baseDir()}/${nameWithSuf(n)}.${ext}`;
+      function path(name, ext) {
+        // ext includes suffix like "json.gz" or "geojson.gz"
+        return `${baseDir()}/${name}.${ext}`;
       }
 
-      // ---------- range computations ----------
-      function getRecord(periodKey, campaign, city) {
-        return state.periods?.[periodKey]?.[campaign]?.[city] || null;
-      }
-      function currentCitiesCampaignDict(periodKey) {
-        return state.periods?.[periodKey]?.[state.campaign] || {};
-      }
-      function getMetricValue(rec, metric) {
-        if (!rec) return NaN;
-        if (metric === "CTR") return rec.val_ctr;
-        if (metric === "Clicks") return rec.val_clicks;
-        return rec.val_conversions;
-      }
+      // ---------- aggregation helpers ----------
+      function aggregateRange(daily, fromStr, toStr) {
+        const aggr = {};
+        for (const c of CAMPAIGNS) aggr[c] = {};
 
-      function findMinPositiveCurrent(metric) {
-        // Only used in absolute mode for Clicks/Conversions
-        const key = metric === "Clicks" ? "val_clicks" : "val_conversions";
-        let m = Infinity;
-        const byCity = (state.metricsPeriod?.[state.campaign]) || {};
-        for (const rec of Object.values(byCity)) {
-          const v = rec?.[key];
-          if (Number.isFinite(v) && v > 0 && v < m) m = v;
+        if (!daily || !fromStr || !toStr) return aggr;
+        const [from, to] = ensureOrdered(fromStr, toStr);
+
+        const dates = Object.keys(daily);
+        for (const d of dates) {
+          if (d < from || d > to) continue;
+          const byCamp = daily[d] || {};
+          for (const camp of CAMPAIGNS) {
+            const cityMap = byCamp[camp] || {};
+            const targetCamp = aggr[camp];
+            for (const [city, rec] of Object.entries(cityMap)) {
+              if (!targetCamp[city]) {
+                targetCamp[city] = {
+                  impr_sum: 0,
+                  val_clicks: 0,
+                  val_conversions: 0,
+                };
+              }
+              const t = targetCamp[city];
+              t.impr_sum        += Number(rec.impr_sum)        || 0;
+              t.val_clicks      += Number(rec.val_clicks)      || 0;
+              t.val_conversions += Number(rec.val_conversions) || 0;
+            }
+          }
         }
-        return Number.isFinite(m) ? m : null;
+
+        // compute CTR + color helpers
+        for (const camp of CAMPAIGNS) {
+          for (const rec of Object.values(aggr[camp])) {
+            rec.val_ctr = (rec.impr_sum > 0)
+              ? rec.val_clicks / rec.impr_sum
+              : NaN;
+            rec.val_clicks_color      = Math.log1p(rec.val_clicks);
+            rec.val_conversions_color = Math.log1p(rec.val_conversions);
+            rec.val_ctr_color         = rec.val_ctr;
+          }
+        }
+
+        return aggr;
       }
 
-      // Absolute mode: recompute ranges for selected period+campaign
       function recomputeRangesAbsolute() {
-        const byCity = (state.metricsPeriod?.[state.campaign]) || {};
-        let ctrMin=Infinity, ctrMax=-Infinity, clkMin=Infinity, clkMax=-Infinity, convMin=Infinity, convMax=-Infinity;
+        const byCity = (state.aggregatedAbs?.[state.campaign]) || {};
+        let ctrMin=Infinity, ctrMax=-Infinity,
+            clkMin=Infinity, clkMax=-Infinity,
+            convMin=Infinity, convMax=-Infinity;
 
         for (const rec of Object.values(byCity)) {
           const c = rec?.val_ctr;
@@ -155,32 +194,52 @@
         if (!Number.isFinite(clkMin)) clkMin = clkMax = 0;
         if (!Number.isFinite(convMin)) convMin = convMax = 0;
 
-        state.ranges = { ctr: [ctrMin, ctrMax], clicks: [clkMin, clkMax], conversions: [convMin, convMax] };
+        state.ranges = {
+          ctr:         [ctrMin, ctrMax],
+          clicks:      [clkMin, clkMax],
+          conversions: [convMin, convMax],
+        };
       }
 
-      // ---------- % difference (standard) with gates on BOTH periods ----------
-      // %Δ = 100 * (to - from) / |from|
+      function findMinPositiveCurrent(metric) {
+        const key = metric === "Clicks" ? "val_clicks" : "val_conversions";
+        const byCity = (state.aggregatedAbs?.[state.campaign]) || {};
+        let m = Infinity;
+        for (const rec of Object.values(byCity)) {
+          const v = rec?.[key];
+          if (Number.isFinite(v) && v > 0 && v < m) m = v;
+        }
+        return Number.isFinite(m) ? m : null;
+      }
+
+      // ---------- % difference ----------
+      function getMetricValue(rec, metric) {
+        if (!rec) return NaN;
+        if (metric === "CTR")        return rec.val_ctr;
+        if (metric === "Clicks")     return rec.val_clicks;
+        if (metric === "Conversions")return rec.val_conversions;
+        return NaN;
+      }
+
       function computePctDiffByCity() {
-        const out = {}; // city -> { pct, from, to }
-        const dictFrom = currentCitiesCampaignDict(state.periodFrom);
-        const dictTo   = currentCitiesCampaignDict(state.periodTo);
+        const out = {}; // city -> {pct, from, to}
+        const dictFrom = state.aggregatedFrom?.[state.campaign] || {};
+        const dictTo   = state.aggregatedTo?.[state.campaign]   || {};
 
         const cities = new Set([...Object.keys(dictFrom), ...Object.keys(dictTo)]);
         for (const city of cities) {
           const recFrom = dictFrom[city] || null;
           const recTo   = dictTo[city]   || null;
 
-          // Main metric values
           const vFrom = getMetricValue(recFrom, state.metric);
           const vTo   = getMetricValue(recTo,   state.metric);
 
-          // Gating signals
-          const clicksFrom = recFrom?.val_clicks ?? NaN;
-          const clicksTo   = recTo?.val_clicks   ?? NaN;
+          const clicksFrom = recFrom?.val_clicks      ?? NaN;
+          const clicksTo   = recTo?.val_clicks        ?? NaN;
           const convsFrom  = recFrom?.val_conversions ?? NaN;
           const convsTo    = recTo?.val_conversions   ?? NaN;
-          const imprFrom   = recFrom?.impr_sum ?? NaN;
-          const imprTo     = recTo?.impr_sum   ?? NaN;
+          const imprFrom   = recFrom?.impr_sum        ?? NaN;
+          const imprTo     = recTo?.impr_sum          ?? NaN;
 
           let passes = true;
           if (state.metric === "Clicks") {
@@ -193,8 +252,8 @@
             }
           } else if (state.metric === "Conversions") {
             const t = THRESHOLDS.Conversions;
-            if (!(Number.isFinite(convsFrom) && convsFrom >= t.minPurch &&
-                  Number.isFinite(convsTo)   && convsTo   >= t.minPurch &&
+            if (!(Number.isFinite(convsFrom)  && convsFrom  >= t.minPurch &&
+                  Number.isFinite(convsTo)    && convsTo    >= t.minPurch &&
                   Number.isFinite(clicksFrom) && clicksFrom >= t.minClicks &&
                   Number.isFinite(clicksTo)   && clicksTo   >= t.minClicks)) {
               passes = false;
@@ -219,7 +278,6 @@
         return out;
       }
 
-      // Use actual min/max (not forced symmetric)
       function recomputeRangesPct(pctDict) {
         let min = Infinity, max = -Infinity;
         for (const { pct } of Object.values(pctDict)) {
@@ -232,57 +290,34 @@
         state.ranges = { pct: [min, max] };
       }
 
-      // Adaptive color scale: diverging if crosses 0, else sequential
       function getScalePct() {
         const [min, max] = state.ranges.pct;
 
         if (min < 0 && max > 0) {
-          // Diverging around 0
           const scale = chroma.scale(["#67000d", "#f7f7f7", "#08306b"]).domain([min, 0, max]);
           return (pct) => (Number.isFinite(pct) ? scale(pct).hex() : "#d3d3d3");
         }
         if (max <= 0) {
-          // All non-positive: red (more negative) -> neutral
           const scale = chroma.scale(["#67000d", "#f7f7f7"]).domain([min, 0]);
           return (pct) => (Number.isFinite(pct) ? scale(pct).hex() : "#d3d3d3");
         }
-        // All non-negative: neutral -> blue
         const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([0, max]);
         return (pct) => (Number.isFinite(pct) ? scale(pct).hex() : "#d3d3d3");
       }
 
-      // ---------- feature styling / tooltip ----------
-      let pctCache = null; // city -> {pct, from, to}
-
-      function styleFeature(feat) {
-        const city = feat.properties[state.cityProp];
-        if (state.mode === "absolute") {
-          const rec  = (state.metricsPeriod?.[state.campaign] || {})[city] || null;
-          const v =
-            state.metric === "CTR" ? rec?.val_ctr :
-            state.metric === "Clicks" ? rec?.val_clicks :
-            rec?.val_conversions;
-          const fill = getScaleAbsolute(state.metric)(v);
-          return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(v)?0.75:0.25 };
-        } else {
-          const info = pctCache?.[city] || { pct: NaN };
-          const fill = getScalePct()(info.pct);
-          return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(info.pct)?0.75:0.25 };
-        }
-      }
-
+      // ---------- styling / tooltips ----------
       function getScaleAbsolute(metric) {
         let [min, max] =
-          metric === "CTR" ? state.ranges.ctr :
-          metric === "Clicks" ? state.ranges.clicks :
-          state.ranges.conversions;
+          metric === "CTR"       ? state.ranges.ctr :
+          metric === "Clicks"    ? state.ranges.clicks :
+                                   state.ranges.conversions;
 
         if (metric === "CTR") {
           const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
           return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
         } else {
           const eps = 1e-9;
-          const minPos = findMinPositiveCurrent(metric) || eps; // current slice only
+          const minPos = findMinPositiveCurrent(metric) || eps;
           const minForDomain = min > 0 ? min : minPos;
           const logMin = Math.log10(Math.max(minForDomain, eps));
           const logMax = Math.log10(Math.max(max, eps));
@@ -291,6 +326,23 @@
             const u = (Number.isFinite(v) && v > 0) ? Math.log10(v) : NaN;
             return Number.isFinite(u) ? scale(u).hex() : "#d3d3d3";
           };
+        }
+      }
+
+      function styleFeature(feat) {
+        const city = feat.properties[state.cityProp];
+        if (state.mode === "absolute") {
+          const rec  = (state.aggregatedAbs?.[state.campaign] || {})[city] || null;
+          const v =
+            state.metric === "CTR"        ? rec?.val_ctr :
+            state.metric === "Clicks"     ? rec?.val_clicks :
+                                            rec?.val_conversions;
+          const fill = getScaleAbsolute(state.metric)(v);
+          return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(v)?0.75:0.25 };
+        } else {
+          const info = state.pctCache?.[city] || { pct: NaN };
+          const fill = getScalePct()(info.pct);
+          return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(info.pct)?0.75:0.25 };
         }
       }
 
@@ -313,15 +365,16 @@
       function onEachFeature(feat, layer) {
         const city = feat.properties[state.cityProp];
         if (state.mode === "absolute") {
-          const rec  = (state.metricsPeriod?.[state.campaign] || {})[city] || null;
-          layer.bindTooltip(`<b>${city}</b><br>${state.metric}: ${formatValueAbsolute(rec)}`, { sticky: true });
+          const rec  = (state.aggregatedAbs?.[state.campaign] || {})[city] || null;
+          layer.bindTooltip(
+            `<b>${city}</b><br>${state.metric}: ${formatValueAbsolute(rec)}`,
+            { sticky: true }
+          );
         } else {
-          const info = pctCache?.[city] || null;
-          const tFrom = PERIODS_PCT.find(p=>p.key===state.periodFrom)?.label ?? state.periodFrom;
-          const tTo   = PERIODS_PCT.find(p=>p.key===state.periodTo)?.label ?? state.periodTo;
+          const info = state.pctCache?.[city] || null;
           const val = formatValuePct(info);
           layer.bindTooltip(
-            `<b>${city}</b><br>${state.metric} %Δ (${tFrom} → ${tTo}): ${val}`,
+            `<b>${city}</b><br>${state.metric} %Δ (A → B): ${val}`,
             { sticky: true }
           );
         }
@@ -333,28 +386,71 @@
         state.fillLayer.eachLayer((l) => onEachFeature(l.feature, l));
       }
 
+      // ---------- date input sync ----------
+      function syncAllDateInputs() {
+        const meta = state.meta || {};
+        const min = meta.min_date;
+        const max = meta.max_date;
+        if (!min || !max) return;
+
+        if (!state.dateFromAbs) state.dateFromAbs = min;
+        if (!state.dateToAbs)   state.dateToAbs   = max;
+        if (!state.dateFromA)   state.dateFromA   = min;
+        if (!state.dateToA)     state.dateToA     = max;
+        if (!state.dateFromB)   state.dateFromB   = min;
+        if (!state.dateToB)     state.dateToB     = max;
+
+        const setBounds = (id, val) => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          el.min = min;
+          el.max = max;
+          el.value = val;
+        };
+
+        setBounds("from-date-abs", state.dateFromAbs);
+        setBounds("to-date-abs",   state.dateToAbs);
+        setBounds("from-date-a",   state.dateFromA);
+        setBounds("to-date-a",     state.dateToA);
+        setBounds("from-date-b",   state.dateFromB);
+        setBounds("to-date-b",     state.dateToB);
+      }
+
       // ---------- controls ----------
       function renderTimeControlsHTML() {
         if (state.mode === "absolute") {
-          let html = '<h4>Time Range</h4>';
-          for (const p of PERIODS_ORDERED) {
-            html += '<label><input type="radio" name="period" value="' + p.key + '" ' +
-                    (state.period === p.key ? 'checked' : '') + '/> ' + p.label + '</label>';
-          }
-          return html;
+          return `
+            <h4>Time Range</h4>
+            <div class="date-row">
+              <span>From</span>
+              <input type="date" id="from-date-abs" name="from_date_abs" />
+            </div>
+            <div class="date-row">
+              <span>To</span>
+              <input type="date" id="to-date-abs" name="to_date_abs" />
+            </div>
+          `;
         } else {
-          let opts = '';
-          for (const p of PERIODS_PCT) {
-            opts += '<option value="' + p.key + '">' + p.label + '</option>';
-          }
-          return ''
-            + '<h4>Period Pair</h4>'
-            + '<div class="inline"><div class="muted">From</div>'
-            +   '<select name="periodFrom">' + opts + '</select>'
-            + '</div>'
-            + '<div class="inline"><div class="muted">To</div>'
-            +   '<select name="periodTo">' + opts + '</select>'
-            + '</div>';
+          return `
+            <h4>Range A (From)</h4>
+            <div class="date-row">
+              <span>From</span>
+              <input type="date" id="from-date-a" name="from_date_a" />
+            </div>
+            <div class="date-row">
+              <span>To</span>
+              <input type="date" id="to-date-a" name="to_date_a" />
+            </div>
+            <h4 style="margin-top:6px;">Range B (To)</h4>
+            <div class="date-row">
+              <span>From</span>
+              <input type="date" id="from-date-b" name="from_date_b" />
+            </div>
+            <div class="date-row">
+              <span>To</span>
+              <input type="date" id="to-date-b" name="to_date_b" />
+            </div>
+          `;
         }
       }
 
@@ -366,44 +462,34 @@
 
             let html = '';
             html += '<h4>Mode</h4>';
-            html += '<label><input type="radio" name="mode" value="absolute" ' + (state.mode === 'absolute' ? 'checked' : '') + '/> Absolute</label>';
-            html += '<label><input type="radio" name="mode" value="pct" ' + (state.mode === 'pct' ? 'checked' : '') + '/> % Difference</label>';
-            // time controls + pct note block right below
+            html += `<label><input type="radio" name="mode" value="absolute" ${state.mode === 'absolute' ? 'checked' : ''}/> Absolute</label>`;
+            html += `<label><input type="radio" name="mode" value="pct" ${state.mode === 'pct' ? 'checked' : ''}/> % Difference</label>`;
             html += '<hr/><div id="time-block">' + renderTimeControlsHTML() + '</div>';
             html += '<div id="pct-note" class="note muted" style="display:none"></div>';
             html += '<hr/>';
 
             html += '<h4>Campaign</h4>';
-            for (const c of ["ALL","Display","Search"]) {
-              html += '<label><input type="radio" name="camp" value="' + c + '" ' + (state.campaign === c ? 'checked' : '') + '/> ' + c + '</label>';
+            for (const c of CAMPAIGNS) {
+              html += `<label><input type="radio" name="camp" value="${c}" ${state.campaign === c ? 'checked' : ''}/> ${c}</label>`;
             }
             html += '<hr/>';
 
             html += '<h4>Metric</h4>';
             for (const m of ["Clicks","CTR","Conversions"]) {
-              html += '<label><input type="radio" name="metric" value="' + m + '" ' + (state.metric === m ? 'checked' : '') + '/> ' + m + '</label>';
+              html += `<label><input type="radio" name="metric" value="${m}" ${state.metric === m ? 'checked' : ''}/> ${m}</label>`;
             }
             html += '<hr/>';
 
             html += '<h4>Labels</h4>';
-            html += '<label><input type="checkbox" name="labels" ' + (state.showLabels ? 'checked' : '') + '/> City Name</label>';
+            html += `<label><input type="checkbox" name="labels" ${state.showLabels ? 'checked' : ''}/> City Name</label>`;
             html += '<hr/>';
 
             html += '<h4>LA + SD</h4>';
-            html += '<label><input type="radio" name="la" value="on" ' + (state.includeLA ? 'checked' : '') + '/> On</label>';
-            html += '<label><input type="radio" name="la" value="off" ' + (!state.includeLA ? 'checked' : '') + '/> Off</label>';
+            html += `<label><input type="radio" name="la" value="on"  ${state.includeLA ? 'checked' : ''}/> On</label>`;
+            html += `<label><input type="radio" name="la" value="off" ${!state.includeLA ? 'checked' : ''}/> Off</label>`;
 
             div.innerHTML = html;
 
-            function rewireTimeBlockSelects() {
-              const selFrom = div.querySelector('select[name="periodFrom"]');
-              const selTo   = div.querySelector('select[name="periodTo"]');
-              if (selFrom) selFrom.value = state.periodFrom;
-              if (selTo)   selTo.value   = state.periodTo;
-            }
-            rewireTimeBlockSelects();
-
-            // --- show/hide and set the % note text based on mode ---
             function updatePctNote() {
               const el = div.querySelector('#pct-note');
               if (!el) return;
@@ -411,67 +497,73 @@
                 el.style.display = 'block';
                 el.innerHTML = '<b>NOTE: CITY SHADING IS NEUTRAL</b><br>' +
                                'if either range has very low volume.<br>' +
-                               'Clicks: 25 Clicks, 100 Impressions<br>' +
-                               'Conversions: 25 Clicks, 5 Purchases<br>' +
-                               'CTR: 25 Clicks, 100 Impressions';
+                               'Clicks: 25 Clicks & 100 Impressions in each range<br>' +
+                               'Conversions: 25 Clicks & 5 Purchases in each range<br>' +
+                               'CTR: 25 Clicks & 100 Impressions in each range';
               } else {
                 el.style.display = 'none';
                 el.textContent = '';
               }
             }
+
+            syncAllDateInputs();
             updatePctNote();
 
             div.addEventListener("change", async (e) => {
               if (e.target.name === "mode") {
                 state.mode = e.target.value;
-
-                if (state.mode === "pct") {
-                  const ordered = PERIODS_PCT;
-                  // Try to anchor around current absolute period; if not found, use first two
-                  let idx = ordered.findIndex(p => p.key === state.period);
-                  if (idx < 0) idx = 0;
-                  const from = ordered[Math.max(0, idx - 1)]?.key ?? ordered[0]?.key;
-                  let to     = ordered[Math.min(idx, ordered.length - 1)]?.key ?? ordered[0]?.key;
-                  if (to === from && ordered.length > 1) {
-                    to = ordered[Math.min(idx + 1, ordered.length - 1)].key;
-                  }
-                  state.periodFrom = from || ordered[0]?.key;
-                  state.periodTo   = to   || ordered[1]?.key || state.periodFrom;
-                }
-
                 const tb = div.querySelector("#time-block");
                 tb.innerHTML = renderTimeControlsHTML();
-                rewireTimeBlockSelects();
-
-                updatePctNote();                 // ensure note visibility matches mode
+                syncAllDateInputs();
+                updatePctNote();
                 refreshComputationAndRedraw();
               }
 
-              if (e.target.name === "period") {
-                state.period = e.target.value;
-                state.metricsPeriod = state.periods?.[state.period] || {};
-                recomputeRangesAbsolute();
-                updateLegend(); rebuildChoropleth(); updateLabels();
-              }
-
-              if (e.target.name === "periodFrom" || e.target.name === "periodTo") {
-                const selFrom = div.querySelector('select[name="periodFrom"]');
-                const selTo   = div.querySelector('select[name="periodTo"]');
-                state.periodFrom = selFrom.value;
-                state.periodTo   = selTo.value;
+              if (e.target.name === "camp") {
+                state.campaign = e.target.value;
                 refreshComputationAndRedraw();
               }
 
-              if (e.target.name === "camp")   { state.campaign = e.target.value; refreshComputationAndRedraw(); }
-              if (e.target.name === "metric") { state.metric   = e.target.value; refreshComputationAndRedraw(); }
+              if (e.target.name === "metric") {
+                state.metric = e.target.value;
+                refreshComputationAndRedraw();
+              }
+
               if (e.target.name === "labels") {
                 state.showLabels = e.target.checked;
                 if (state.showLabels) updateLabels(); else clearLabels();
               }
+
               if (e.target.name === "la") {
                 state.includeLA = e.target.value === "on";
                 localStorage.setItem("includeLA", state.includeLA);
                 await loadDataset();
+              }
+
+              // Date inputs
+              if (e.target.name === "from_date_abs") {
+                state.dateFromAbs = e.target.value || state.dateFromAbs;
+                refreshComputationAndRedraw();
+              }
+              if (e.target.name === "to_date_abs") {
+                state.dateToAbs = e.target.value || state.dateToAbs;
+                refreshComputationAndRedraw();
+              }
+              if (e.target.name === "from_date_a") {
+                state.dateFromA = e.target.value || state.dateFromA;
+                refreshComputationAndRedraw();
+              }
+              if (e.target.name === "to_date_a") {
+                state.dateToA = e.target.value || state.dateToA;
+                refreshComputationAndRedraw();
+              }
+              if (e.target.name === "from_date_b") {
+                state.dateFromB = e.target.value || state.dateFromB;
+                refreshComputationAndRedraw();
+              }
+              if (e.target.name === "to_date_b") {
+                state.dateToB = e.target.value || state.dateToB;
+                refreshComputationAndRedraw();
               }
             });
 
@@ -511,9 +603,9 @@
 
         if (state.mode === "absolute") {
           let [minRaw, maxRaw] =
-            state.metric === "CTR" ? state.ranges.ctr :
-            state.metric === "Clicks" ? state.ranges.clicks :
-            state.ranges.conversions;
+            state.metric === "CTR"       ? state.ranges.ctr :
+            state.metric === "Clicks"    ? state.ranges.clicks :
+                                            state.ranges.conversions;
 
           if (state.metric !== "CTR" && minRaw <= 0) {
             const floor = findMinPositiveCurrent(state.metric);
@@ -521,8 +613,12 @@
           }
 
           elTitle.textContent = state.metric + (state.metric === "CTR" ? "" : " (log-scaled)");
-          elMin.textContent   = state.metric === "CTR" ? (minRaw*100).toFixed(1) + "%" : Math.round(minRaw).toLocaleString();
-          elMax.textContent   = state.metric === "CTR" ? (maxRaw*100).toFixed(1) + "%" : Math.round(maxRaw).toLocaleString();
+          elMin.textContent   = state.metric === "CTR"
+            ? (minRaw*100).toFixed(1) + "%"
+            : Math.round(minRaw).toLocaleString();
+          elMax.textContent   = state.metric === "CTR"
+            ? (maxRaw*100).toFixed(1) + "%"
+            : Math.round(maxRaw).toLocaleString();
 
           const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([0,1]);
           elScale.style.background = sampleGradient(scale);
@@ -532,7 +628,6 @@
           elMin.textContent   = `${min.toFixed(1)}%`;
           elMax.textContent   = `${max.toFixed(1)}%`;
 
-          // Preview gradient matches adaptive scale
           let previewScale;
           if (min < 0 && max > 0) {
             previewScale = chroma.scale(["#67000d","#f7f7f7","#08306b"]).domain([0,0.5,1]);
@@ -547,7 +642,12 @@
 
       // ---------- labels ----------
       let labelData = null;
-      function clearLabels() { if (state.labelLayer) { state.map.removeLayer(state.labelLayer); state.labelLayer = null; } }
+      function clearLabels() {
+        if (state.labelLayer) {
+          state.map.removeLayer(state.labelLayer);
+          state.labelLayer = null;
+        }
+      }
       function updateLabels() {
         if (!labelData) return;
         clearLabels();
@@ -561,7 +661,10 @@
         state.labelLayer = L.layerGroup(markers).addTo(state.map);
         function toggleByZoom() {
           const z = state.map.getZoom();
-          state.labelLayer.getLayers().forEach((m) => (m.getElement().style.display = z >= 7 ? "block" : "none"));
+          state.labelLayer.getLayers().forEach((m) => {
+            const el = m.getElement();
+            if (el) el.style.display = z >= 7 ? "block" : "none";
+          });
         }
         toggleByZoom();
         state.map.off("zoomend", toggleByZoom);
@@ -571,13 +674,18 @@
       // ---------- load & refresh ----------
       async function loadDataset() {
         const json = await fetchGzipJSON(path("city_metrics", "json.gz"));
-        state.periods = json.periods || {};
-        state.metricsPeriod = state.periods[state.period] || {};
-        recomputeRangesAbsolute(); // initialize (absolute mode default)
+        state.daily = json.daily || {};
+        state.meta  = json.meta  || {};
+
+        syncAllDateInputs();
+        refreshComputationAndRedraw();
 
         const geo = await fetchGzipGeoOrTopoAsGeoJSON(path("regions", "geojson.gz"));
         state.cityProp = detectCityProp(geo.features[0]);
-        if (state.fillLayer) { state.map.removeLayer(state.fillLayer); state.fillLayer = null; }
+        if (state.fillLayer) {
+          state.map.removeLayer(state.fillLayer);
+          state.fillLayer = null;
+        }
         state.fillLayer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(state.map);
 
         labelData = await fetchGzipJSON(path("city_labels", "json.gz"));
@@ -587,13 +695,41 @@
       }
 
       function refreshComputationAndRedraw() {
+        if (!state.daily || !state.meta) return;
+
         if (state.mode === "absolute") {
-          state.metricsPeriod = state.periods?.[state.period] || {};
+          if (!state.dateFromAbs || !state.dateToAbs) {
+            state.dateFromAbs = state.meta.min_date;
+            state.dateToAbs   = state.meta.max_date;
+          }
+          const [from, to] = ensureOrdered(state.dateFromAbs, state.dateToAbs);
+          state.dateFromAbs = from;
+          state.dateToAbs   = to;
+
+          state.aggregatedAbs = aggregateRange(state.daily, from, to);
           recomputeRangesAbsolute();
         } else {
-          pctCache = computePctDiffByCity();
-          recomputeRangesPct(pctCache);
+          if (!state.dateFromA || !state.dateToA) {
+            state.dateFromA = state.meta.min_date;
+            state.dateToA   = state.meta.max_date;
+          }
+          if (!state.dateFromB || !state.dateToB) {
+            state.dateFromB = state.meta.min_date;
+            state.dateToB   = state.meta.max_date;
+          }
+
+          let [fromA, toA] = ensureOrdered(state.dateFromA, state.dateToA);
+          let [fromB, toB] = ensureOrdered(state.dateFromB, state.dateToB);
+          state.dateFromA = fromA; state.dateToA = toA;
+          state.dateFromB = fromB; state.dateToB = toB;
+
+          state.aggregatedFrom = aggregateRange(state.daily, fromA, toA);
+          state.aggregatedTo   = aggregateRange(state.daily, fromB, toB);
+          state.pctCache       = computePctDiffByCity();
+          recomputeRangesPct(state.pctCache);
         }
+
+        syncAllDateInputs();
         updateLegend();
         rebuildChoropleth();
         updateLabels();
@@ -602,7 +738,8 @@
       // ---------- init ----------
       (async function main() {
         state.map = L.map("map").setView([36.7783, -119.4179], 6);
-        L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png",
+        L.tileLayer(
+          "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png",
           { attribution: "&copy; OpenStreetMap contributors & Carto", maxZoom: 18 }
         ).addTo(state.map);
         state.map.addControl(makeControl());

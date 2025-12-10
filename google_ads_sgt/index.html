@@ -36,6 +36,16 @@
         font-size:11px;
         padding:2px 3px;
       }
+      .th-row {
+        font-size:11px;
+        line-height:1.3;
+      }
+      .th-row input[type="number"] {
+        width:45px;
+        font-size:11px;
+        padding:1px 2px;
+        margin:0 2px;
+      }
     </style>
   </head>
 
@@ -82,13 +92,6 @@
       const CAMPAIGNS = ["ALL","Display","Search"];
       const EPS = 1e-9;
 
-      // % diff gating thresholds
-      const THRESHOLDS = {
-        Clicks:       { minClicks: 25, minImpr: 100 },
-        Conversions:  { minPurch:  5, minClicks: 25 },
-        CTR:          { minClicks: 25, minImpr: 100 },
-      };
-
       const state = {
         mode: "absolute", // "absolute" | "pct"
 
@@ -119,6 +122,16 @@
         legend: null,
         showLabels: true,
         includeLA: (localStorage.getItem("includeLA") ?? "true") === "true",
+
+        // dynamic % diff thresholds
+        thresholds: {
+          clicksMinClicks: 25,
+          clicksMinImpr: 100,
+          convMinPurch: 5,
+          convMinClicks: 25,
+          ctrMinClicks: 25,
+          ctrMinImpr: 100,
+        },
       };
 
       function baseDir() {
@@ -226,6 +239,8 @@
         const dictFrom = state.aggregatedFrom?.[state.campaign] || {};
         const dictTo   = state.aggregatedTo?.[state.campaign]   || {};
 
+        const t = state.thresholds;
+
         const cities = new Set([...Object.keys(dictFrom), ...Object.keys(dictTo)]);
         for (const city of cities) {
           const recFrom = dictFrom[city] || null;
@@ -243,27 +258,24 @@
 
           let passes = true;
           if (state.metric === "Clicks") {
-            const t = THRESHOLDS.Clicks;
-            if (!(Number.isFinite(clicksFrom) && clicksFrom >= t.minClicks &&
-                  Number.isFinite(clicksTo)   && clicksTo   >= t.minClicks &&
-                  Number.isFinite(imprFrom)   && imprFrom   >= t.minImpr &&
-                  Number.isFinite(imprTo)     && imprTo     >= t.minImpr)) {
+            if (!(Number.isFinite(clicksFrom) && clicksFrom >= t.clicksMinClicks &&
+                  Number.isFinite(clicksTo)   && clicksTo   >= t.clicksMinClicks &&
+                  Number.isFinite(imprFrom)   && imprFrom   >= t.clicksMinImpr &&
+                  Number.isFinite(imprTo)     && imprTo     >= t.clicksMinImpr)) {
               passes = false;
             }
           } else if (state.metric === "Conversions") {
-            const t = THRESHOLDS.Conversions;
-            if (!(Number.isFinite(convsFrom)  && convsFrom  >= t.minPurch &&
-                  Number.isFinite(convsTo)    && convsTo    >= t.minPurch &&
-                  Number.isFinite(clicksFrom) && clicksFrom >= t.minClicks &&
-                  Number.isFinite(clicksTo)   && clicksTo   >= t.minClicks)) {
+            if (!(Number.isFinite(convsFrom)  && convsFrom  >= t.convMinPurch &&
+                  Number.isFinite(convsTo)    && convsTo    >= t.convMinPurch &&
+                  Number.isFinite(clicksFrom) && clicksFrom >= t.convMinClicks &&
+                  Number.isFinite(clicksTo)   && clicksTo   >= t.convMinClicks)) {
               passes = false;
             }
           } else if (state.metric === "CTR") {
-            const t = THRESHOLDS.CTR;
-            if (!(Number.isFinite(clicksFrom) && clicksFrom >= t.minClicks &&
-                  Number.isFinite(clicksTo)   && clicksTo   >= t.minClicks &&
-                  Number.isFinite(imprFrom)   && imprFrom   >= t.minImpr &&
-                  Number.isFinite(imprTo)     && imprTo     >= t.minImpr)) {
+            if (!(Number.isFinite(clicksFrom) && clicksFrom >= t.ctrMinClicks &&
+                  Number.isFinite(clicksTo)   && clicksTo   >= t.ctrMinClicks &&
+                  Number.isFinite(imprFrom)   && imprFrom   >= t.ctrMinImpr &&
+                  Number.isFinite(imprTo)     && imprTo     >= t.ctrMinImpr)) {
               passes = false;
             }
           }
@@ -454,6 +466,34 @@
         }
       }
 
+      function thresholdsHTML() {
+        const t = state.thresholds;
+        return `
+          <h4>% Diff Thresholds</h4>
+          <div class="th-row">
+            <b>Clicks</b>:
+            <input type="number" name="th_clicks_minClicks" value="${t.clicksMinClicks}" min="0" />
+            clicks,
+            <input type="number" name="th_clicks_minImpr" value="${t.clicksMinImpr}" min="0" />
+            impr
+          </div>
+          <div class="th-row">
+            <b>Conversions</b>:
+            <input type="number" name="th_conv_minPurch" value="${t.convMinPurch}" min="0" />
+            conv,
+            <input type="number" name="th_conv_minClicks" value="${t.convMinClicks}" min="0" />
+            clicks
+          </div>
+          <div class="th-row">
+            <b>CTR</b>:
+            <input type="number" name="th_ctr_minClicks" value="${t.ctrMinClicks}" min="0" />
+            clicks,
+            <input type="number" name="th_ctr_minImpr" value="${t.ctrMinImpr}" min="0" />
+            impr
+          </div>
+        `;
+      }
+
       function makeControl() {
         const Control = L.Control.extend({
           options: { position: "topright" },
@@ -465,6 +505,8 @@
             html += `<label><input type="radio" name="mode" value="absolute" ${state.mode === 'absolute' ? 'checked' : ''}/> Absolute</label>`;
             html += `<label><input type="radio" name="mode" value="pct" ${state.mode === 'pct' ? 'checked' : ''}/> % Difference</label>`;
             html += '<hr/><div id="time-block">' + renderTimeControlsHTML() + '</div>';
+            html += '<hr/>';
+            html += '<div id="threshold-block">' + thresholdsHTML() + '</div>';
             html += '<div id="pct-note" class="note muted" style="display:none"></div>';
             html += '<hr/>';
 
@@ -493,13 +535,15 @@
             function updatePctNote() {
               const el = div.querySelector('#pct-note');
               if (!el) return;
+              const t = state.thresholds;
               if (state.mode === 'pct') {
                 el.style.display = 'block';
-                el.innerHTML = '<b>NOTE: CITY SHADING IS NEUTRAL</b><br>' +
-                               'if either range has very low volume.<br>' +
-                               'Clicks: 25 Clicks & 100 Impressions in each range<br>' +
-                               'Conversions: 25 Clicks & 5 Purchases in each range<br>' +
-                               'CTR: 25 Clicks & 100 Impressions in each range';
+                el.innerHTML =
+                  '<b>NOTE: CITY SHADING IS NEUTRAL</b><br>' +
+                  'if either range has very low volume.<br>' +
+                  `Clicks: ${t.clicksMinClicks} Clicks & ${t.clicksMinImpr} Impressions in each range<br>` +
+                  `Conversions: ${t.convMinPurch} Conversions & ${t.convMinClicks} Clicks in each range<br>` +
+                  `CTR: ${t.ctrMinClicks} Clicks & ${t.ctrMinImpr} Impressions in each range`;
               } else {
                 el.style.display = 'none';
                 el.textContent = '';
@@ -510,60 +554,93 @@
             updatePctNote();
 
             div.addEventListener("change", async (e) => {
-              if (e.target.name === "mode") {
+              const name = e.target.name;
+
+              if (name === "mode") {
                 state.mode = e.target.value;
                 const tb = div.querySelector("#time-block");
                 tb.innerHTML = renderTimeControlsHTML();
                 syncAllDateInputs();
                 updatePctNote();
                 refreshComputationAndRedraw();
+                return;
               }
 
-              if (e.target.name === "camp") {
+              if (name === "camp") {
                 state.campaign = e.target.value;
                 refreshComputationAndRedraw();
+                return;
               }
 
-              if (e.target.name === "metric") {
+              if (name === "metric") {
                 state.metric = e.target.value;
                 refreshComputationAndRedraw();
+                return;
               }
 
-              if (e.target.name === "labels") {
+              if (name === "labels") {
                 state.showLabels = e.target.checked;
                 if (state.showLabels) updateLabels(); else clearLabels();
+                return;
               }
 
-              if (e.target.name === "la") {
+              if (name === "la") {
                 state.includeLA = e.target.value === "on";
                 localStorage.setItem("includeLA", state.includeLA);
                 await loadDataset();
+                return;
+              }
+
+              // Threshold inputs
+              if (name.startsWith("th_")) {
+                const v = parseFloat(e.target.value);
+                const safeVal = Number.isFinite(v) && v >= 0 ? v : 0;
+                e.target.value = safeVal;
+
+                if (name === "th_clicks_minClicks") state.thresholds.clicksMinClicks = safeVal;
+                if (name === "th_clicks_minImpr")   state.thresholds.clicksMinImpr   = safeVal;
+                if (name === "th_conv_minPurch")    state.thresholds.convMinPurch    = safeVal;
+                if (name === "th_conv_minClicks")   state.thresholds.convMinClicks   = safeVal;
+                if (name === "th_ctr_minClicks")    state.thresholds.ctrMinClicks    = safeVal;
+                if (name === "th_ctr_minImpr")      state.thresholds.ctrMinImpr      = safeVal;
+
+                updatePctNote();
+                if (state.mode === "pct") {
+                  refreshComputationAndRedraw();
+                }
+                return;
               }
 
               // Date inputs
-              if (e.target.name === "from_date_abs") {
+              if (name === "from_date_abs") {
                 state.dateFromAbs = e.target.value || state.dateFromAbs;
                 refreshComputationAndRedraw();
+                return;
               }
-              if (e.target.name === "to_date_abs") {
+              if (name === "to_date_abs") {
                 state.dateToAbs = e.target.value || state.dateToAbs;
                 refreshComputationAndRedraw();
+                return;
               }
-              if (e.target.name === "from_date_a") {
+              if (name === "from_date_a") {
                 state.dateFromA = e.target.value || state.dateFromA;
                 refreshComputationAndRedraw();
+                return;
               }
-              if (e.target.name === "to_date_a") {
+              if (name === "to_date_a") {
                 state.dateToA = e.target.value || state.dateToA;
                 refreshComputationAndRedraw();
+                return;
               }
-              if (e.target.name === "from_date_b") {
+              if (name === "from_date_b") {
                 state.dateFromB = e.target.value || state.dateFromB;
                 refreshComputationAndRedraw();
+                return;
               }
-              if (e.target.name === "to_date_b") {
+              if (name === "to_date_b") {
                 state.dateToB = e.target.value || state.dateToB;
                 refreshComputationAndRedraw();
+                return;
               }
             });
 

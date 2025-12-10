@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>California Cities Heatmap</title>
+    <title>Google Ads SGT Heatmap - California</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -579,7 +579,7 @@
       function ensureLegend() {
         if (state.legend) return;
         const Legend = L.Control.extend({
-          options: { position: "bottomright" },
+          options: { position: "bottomleft" },
           onAdd: function () {
             const div = L.DomUtil.create("div", "legend leaflet-bar");
             div.innerHTML = `

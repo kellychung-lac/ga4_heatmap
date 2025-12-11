@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Google Ads SGT Heatmap - California</title>
+    <title>Google Ads ST Time Heatmap - California</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -13,12 +13,33 @@
 
     <style>
       html, body, #map { height: 100%; margin: 0; }
-      .control-card { background:#fff; padding:8px 10px; font:12px/1.2 Arial, sans-serif; box-shadow:0 1px 4px rgba(0,0,0,.2); }
+      .control-card {
+        background:#fff;
+        padding:8px 10px;
+        font:12px/1.2 Arial, sans-serif;
+        box-shadow:0 1px 4px rgba(0,0,0,.2);
+      }
       .control-card h4 { margin:4px 0 6px; font-size:12px; }
       .control-card label { display:block; cursor:pointer; margin:2px 0; }
-      .legend { background:#fff; padding:6px 8px; line-height:1.2; box-shadow:0 1px 4px rgba(0,0,0,.2); font:12px/1.2 Arial, sans-serif; }
-      .legend .scale { height:10px; width:220px; background:linear-gradient(to right,#f7fbff,#08306b); margin:4px 0; }
-      .city-label { font-weight:600; font-size:12px; white-space:nowrap; text-shadow:0 1px 2px rgba(255,255,255,.9); }
+      .legend {
+        background:#fff;
+        padding:6px 8px;
+        line-height:1.2;
+        box-shadow:0 1px 4px rgba(0,0,0,.2);
+        font:12px/1.2 Arial, sans-serif;
+      }
+      .legend .scale {
+        height:10px;
+        width:220px;
+        background:linear-gradient(to right,#f7fbff,#08306b);
+        margin:4px 0;
+      }
+      .city-label {
+        font-weight:600;
+        font-size:12px;
+        white-space:nowrap;
+        text-shadow:0 1px 2px rgba(255,255,255,.9);
+      }
       .inline { display:inline-block; margin-right:8px; }
       .muted { color:#666; }
       .note { margin-top:6px; font-size:11px; line-height:1.3; }
@@ -35,16 +56,6 @@
       .date-row input[type="date"] {
         font-size:11px;
         padding:2px 3px;
-      }
-      .th-row {
-        font-size:11px;
-        line-height:1.3;
-      }
-      .th-row input[type="number"] {
-        width:45px;
-        font-size:11px;
-        padding:1px 2px;
-        margin:0 2px;
       }
     </style>
   </head>
@@ -92,28 +103,36 @@
       const CAMPAIGNS = ["ALL","Display","Search"];
       const EPS = 1e-9;
 
+      // Default thresholds for %-mode (min volume per metric)
+      const DEFAULT_THRESHOLDS = {
+        "Clicks":      { min: 15 },  // min clicks in each range
+        "Conversions": { min: 1 },   // min conversions in each range
+        "CTR":         { min: 15 },  // min clicks in each range for CTR %Δ
+      };
+
       const state = {
         mode: "absolute", // "absolute" | "pct"
 
-        // date ranges (YYYY-MM-DD)
+        // date ranges (as YYYY-MM-DD strings)
         dateFromAbs: null,
         dateToAbs:   null,
-        dateFromA:   null,
-        dateToA:     null,
-        dateFromB:   null,
-        dateToB:     null,
+
+        dateFromA: null, // pct range A
+        dateToA:   null,
+        dateFromB: null, // pct range B
+        dateToB:   null,
 
         campaign: "ALL",
-        metric: "Clicks", // "Clicks" | "Conversions" | "CTR"
+        metric: "Clicks",   // "Clicks" | "Conversions" | "CTR"
 
-        daily: null,       // json.daily
-        meta: null,        // json.meta {min_date,max_date}
-        aggregatedAbs: null,
-        aggregatedFrom: null,
-        aggregatedTo: null,
-        pctCache: null,
+        daily: null,            // json.daily
+        meta: null,             // json.meta {min_date, max_date}
+        aggregatedAbs: null,    // {campaign:{city:{clicks,conversions,impr,ctr}}}
+        aggregatedFrom: null,   // same shape, pct range A
+        aggregatedTo: null,     // same shape, pct range B
+        pctCache: null,         // city -> {pct, from, to}
 
-        ranges: null,      // abs: {clicks:[min,max], conversions:[min,max], ctr:[min,max]} or {pct:[min,max]}
+        ranges: null,           // abs: {clicks:[min,max], conversions:[min,max], ctr:[min,max]} or pct: {pct:[min,max]}
         cityProp: null,
 
         map: null,
@@ -121,24 +140,32 @@
         labelLayer: null,
         legend: null,
         showLabels: true,
-        includeLA: (localStorage.getItem("includeLA") ?? "true") === "true",
+        includeLA: (localStorage.getItem("includeLA_time") ?? "true") === "true",
 
-        // dynamic % diff thresholds
-        thresholds: {
-          clicksMinClicks: 25,
-          clicksMinImpr: 100,
-          convMinPurch: 5,
-          convMinClicks: 25,
-          ctrMinClicks: 25,
-          ctrMinImpr: 100,
-        },
+        thresholds: (() => {
+          let base = null;
+          try {
+            const saved = localStorage.getItem("thresholds_time_v1");
+            if (saved) base = JSON.parse(saved);
+          } catch (e) {
+            console.warn("Could not parse saved thresholds", e);
+          }
+          if (!base) {
+            base = JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS));
+          }
+          // ensure all keys exist
+          for (const [k, def] of Object.entries(DEFAULT_THRESHOLDS)) {
+            if (!base[k]) base[k] = { ...def };
+          }
+          return base;
+        })(),
       };
 
       function baseDir() {
-        return state.includeLA ? "./data_time" : "./data_noLA_noSD_time";
+        // assumes you generate data_time and optionally data_time_noLA_noSD
+        return state.includeLA ? "./data_time" : "./data_time_noLA_noSD";
       }
       function path(name, ext) {
-        // ext includes suffix like "json.gz" or "geojson.gz"
         return `${baseDir()}/${name}.${ext}`;
       }
 
@@ -159,29 +186,23 @@
             const targetCamp = aggr[camp];
             for (const [city, rec] of Object.entries(cityMap)) {
               if (!targetCamp[city]) {
-                targetCamp[city] = {
-                  impr_sum: 0,
-                  val_clicks: 0,
-                  val_conversions: 0,
-                };
+                targetCamp[city] = { clicks: 0, conversions: 0, impr: 0, ctr: NaN };
               }
               const t = targetCamp[city];
-              t.impr_sum        += Number(rec.impr_sum)        || 0;
-              t.val_clicks      += Number(rec.val_clicks)      || 0;
-              t.val_conversions += Number(rec.val_conversions) || 0;
+              const clicks = Number(rec.val_clicks)      || 0;
+              const conv   = Number(rec.val_conversions) || 0;
+              const impr   = Number(rec.impr_sum)        || 0;
+              t.clicks      += clicks;
+              t.conversions += conv;
+              t.impr        += impr;
             }
           }
         }
 
-        // compute CTR + color helpers
+        // compute CTR from aggregated totals
         for (const camp of CAMPAIGNS) {
           for (const rec of Object.values(aggr[camp])) {
-            rec.val_ctr = (rec.impr_sum > 0)
-              ? rec.val_clicks / rec.impr_sum
-              : NaN;
-            rec.val_clicks_color      = Math.log1p(rec.val_clicks);
-            rec.val_conversions_color = Math.log1p(rec.val_conversions);
-            rec.val_ctr_color         = rec.val_ctr;
+            rec.ctr = rec.impr > 0 ? rec.clicks / rec.impr : NaN;
           }
         }
 
@@ -190,33 +211,39 @@
 
       function recomputeRangesAbsolute() {
         const byCity = (state.aggregatedAbs?.[state.campaign]) || {};
-        let ctrMin=Infinity, ctrMax=-Infinity,
-            clkMin=Infinity, clkMax=-Infinity,
-            convMin=Infinity, convMax=-Infinity;
+        let cMin=Infinity, cMax=-Infinity,
+            vMin=Infinity, vMax=-Infinity,
+            ctrMin=Infinity, ctrMax=-Infinity;
 
         for (const rec of Object.values(byCity)) {
-          const c = rec?.val_ctr;
-          if (Number.isFinite(c)) { ctrMin = Math.min(ctrMin, c); ctrMax = Math.max(ctrMax, c); }
-          const k = rec?.val_clicks;
-          if (Number.isFinite(k)) { clkMin = Math.min(clkMin, k); clkMax = Math.max(clkMax, k); }
-          const v = rec?.val_conversions;
-          if (Number.isFinite(v)) { convMin = Math.min(convMin, v); convMax = Math.max(convMax, v); }
+          const clicks = rec?.clicks;
+          if (Number.isFinite(clicks)) { cMin = Math.min(cMin, clicks); cMax = Math.max(cMax, clicks); }
+
+          const conv = rec?.conversions;
+          if (Number.isFinite(conv)) { vMin = Math.min(vMin, conv); vMax = Math.max(vMax, conv); }
+
+          const ctr = rec?.ctr;
+          if (Number.isFinite(ctr)) { ctrMin = Math.min(ctrMin, ctr); ctrMax = Math.max(ctrMax, ctr); }
         }
 
+        if (!Number.isFinite(cMin)) cMin = cMax = 0;
+        if (!Number.isFinite(vMin)) vMin = vMax = 0;
         if (!Number.isFinite(ctrMin)) ctrMin = ctrMax = 0;
-        if (!Number.isFinite(clkMin)) clkMin = clkMax = 0;
-        if (!Number.isFinite(convMin)) convMin = convMax = 0;
 
         state.ranges = {
+          clicks:      [cMin, cMax],
+          conversions: [vMin, vMax],
           ctr:         [ctrMin, ctrMax],
-          clicks:      [clkMin, clkMax],
-          conversions: [convMin, convMax],
         };
       }
 
       function findMinPositiveCurrent(metric) {
-        const key = metric === "Clicks" ? "val_clicks" : "val_conversions";
         const byCity = (state.aggregatedAbs?.[state.campaign]) || {};
+        let key;
+        if (metric === "Clicks") key = "clicks";
+        else if (metric === "Conversions") key = "conversions";
+        else key = "ctr";
+
         let m = Infinity;
         for (const rec of Object.values(byCity)) {
           const v = rec?.[key];
@@ -226,62 +253,41 @@
       }
 
       // ---------- % difference ----------
-      function getMetricValue(rec, metric) {
-        if (!rec) return NaN;
-        if (metric === "CTR")        return rec.val_ctr;
-        if (metric === "Clicks")     return rec.val_clicks;
-        if (metric === "Conversions")return rec.val_conversions;
-        return NaN;
-      }
-
       function computePctDiffByCity() {
         const out = {}; // city -> {pct, from, to}
         const dictFrom = state.aggregatedFrom?.[state.campaign] || {};
         const dictTo   = state.aggregatedTo?.[state.campaign]   || {};
 
-        const t = state.thresholds;
+        const thrCfg =
+          (state.thresholds && state.thresholds[state.metric]) ||
+          { min: 0 };
+        const minVol = thrCfg.min ?? 0;
 
         const cities = new Set([...Object.keys(dictFrom), ...Object.keys(dictTo)]);
         for (const city of cities) {
-          const recFrom = dictFrom[city] || null;
-          const recTo   = dictTo[city]   || null;
+          const recFrom = dictFrom[city] || { clicks: 0, conversions: 0, impr: 0, ctr: NaN };
+          const recTo   = dictTo[city]   || { clicks: 0, conversions: 0, impr: 0, ctr: NaN };
 
-          const vFrom = getMetricValue(recFrom, state.metric);
-          const vTo   = getMetricValue(recTo,   state.metric);
+          let vFrom, vTo, passes;
 
-          const clicksFrom = recFrom?.val_clicks      ?? NaN;
-          const clicksTo   = recTo?.val_clicks        ?? NaN;
-          const convsFrom  = recFrom?.val_conversions ?? NaN;
-          const convsTo    = recTo?.val_conversions   ?? NaN;
-          const imprFrom   = recFrom?.impr_sum        ?? NaN;
-          const imprTo     = recTo?.impr_sum          ?? NaN;
-
-          let passes = true;
           if (state.metric === "Clicks") {
-            if (!(Number.isFinite(clicksFrom) && clicksFrom >= t.clicksMinClicks &&
-                  Number.isFinite(clicksTo)   && clicksTo   >= t.clicksMinClicks &&
-                  Number.isFinite(imprFrom)   && imprFrom   >= t.clicksMinImpr &&
-                  Number.isFinite(imprTo)     && imprTo     >= t.clicksMinImpr)) {
-              passes = false;
-            }
+            vFrom = Number(recFrom.clicks) || 0;
+            vTo   = Number(recTo.clicks)   || 0;
+            passes = vFrom >= minVol && vTo >= minVol;
           } else if (state.metric === "Conversions") {
-            if (!(Number.isFinite(convsFrom)  && convsFrom  >= t.convMinPurch &&
-                  Number.isFinite(convsTo)    && convsTo    >= t.convMinPurch &&
-                  Number.isFinite(clicksFrom) && clicksFrom >= t.convMinClicks &&
-                  Number.isFinite(clicksTo)   && clicksTo   >= t.convMinClicks)) {
-              passes = false;
-            }
-          } else if (state.metric === "CTR") {
-            if (!(Number.isFinite(clicksFrom) && clicksFrom >= t.ctrMinClicks &&
-                  Number.isFinite(clicksTo)   && clicksTo   >= t.ctrMinClicks &&
-                  Number.isFinite(imprFrom)   && imprFrom   >= t.ctrMinImpr &&
-                  Number.isFinite(imprTo)     && imprTo     >= t.ctrMinImpr)) {
-              passes = false;
-            }
+            vFrom = Number(recFrom.conversions) || 0;
+            vTo   = Number(recTo.conversions)   || 0;
+            passes = vFrom >= minVol && vTo >= minVol;
+          } else { // CTR
+            vFrom = Number(recFrom.ctr);
+            vTo   = Number(recTo.ctr);
+            const fromClicks = Number(recFrom.clicks) || 0;
+            const toClicks   = Number(recTo.clicks)   || 0;
+            passes = fromClicks >= minVol && toClicks >= minVol;
           }
 
           let pct = NaN;
-          if (passes && Number.isFinite(vFrom) && Number.isFinite(vTo) && Math.abs(vFrom) > EPS) {
+          if (passes && Number.isFinite(vFrom) && Math.abs(vFrom) > EPS) {
             pct = ((vTo - vFrom) / Math.abs(vFrom)) * 100;
           }
 
@@ -319,36 +325,35 @@
 
       // ---------- styling / tooltips ----------
       function getScaleAbsolute(metric) {
-        let [min, max] =
-          metric === "CTR"       ? state.ranges.ctr :
-          metric === "Clicks"    ? state.ranges.clicks :
-                                   state.ranges.conversions;
+        let rangeKey;
+        if (metric === "Clicks") rangeKey = "clicks";
+        else if (metric === "Conversions") rangeKey = "conversions";
+        else rangeKey = "ctr";
 
-        if (metric === "CTR") {
-          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
-          return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
-        } else {
-          const eps = 1e-9;
-          const minPos = findMinPositiveCurrent(metric) || eps;
-          const minForDomain = min > 0 ? min : minPos;
-          const logMin = Math.log10(Math.max(minForDomain, eps));
-          const logMax = Math.log10(Math.max(max, eps));
-          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([logMin, logMax]);
-          return (v) => {
-            const u = (Number.isFinite(v) && v > 0) ? Math.log10(v) : NaN;
-            return Number.isFinite(u) ? scale(u).hex() : "#d3d3d3";
-          };
-        }
+        const [minRaw, maxRaw] = state.ranges[rangeKey];
+
+        const eps = 1e-9;
+        const minPos = findMinPositiveCurrent(metric) || eps;
+        const minForDomain = minRaw > 0 ? minRaw : minPos;
+        const logMin = Math.log10(Math.max(minForDomain, eps));
+        const logMax = Math.log10(Math.max(maxRaw, eps));
+        const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([logMin, logMax]);
+
+        return (v) => {
+          const u = (Number.isFinite(v) && v > 0) ? Math.log10(v) : NaN;
+          return Number.isFinite(u) ? scale(u).hex() : "#d3d3d3";
+        };
       }
 
       function styleFeature(feat) {
         const city = feat.properties[state.cityProp];
         if (state.mode === "absolute") {
           const rec  = (state.aggregatedAbs?.[state.campaign] || {})[city] || null;
-          const v =
-            state.metric === "CTR"        ? rec?.val_ctr :
-            state.metric === "Clicks"     ? rec?.val_clicks :
-                                            rec?.val_conversions;
+          let v;
+          if (state.metric === "Clicks") v = rec?.clicks;
+          else if (state.metric === "Conversions") v = rec?.conversions;
+          else v = rec?.ctr;
+
           const fill = getScaleAbsolute(state.metric)(v);
           return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(v)?0.75:0.25 };
         } else {
@@ -360,11 +365,16 @@
 
       function formatValueAbsolute(rec) {
         if (!rec) return "—";
-        if (state.metric === "CTR")
-          return Number.isFinite(rec.val_ctr) ? (rec.val_ctr * 100).toFixed(2) + "%" : "—";
-        if (state.metric === "Clicks")
-          return Number.isFinite(rec.val_clicks) ? Math.round(rec.val_clicks).toLocaleString() : "—";
-        return Number.isFinite(rec.val_conversions) ? Math.round(rec.val_conversions).toLocaleString() : "—";
+        if (state.metric === "Clicks") {
+          const v = rec.clicks;
+          return Number.isFinite(v) ? Math.round(v).toLocaleString() : "—";
+        } else if (state.metric === "Conversions") {
+          const v = rec.conversions;
+          return Number.isFinite(v) ? Math.round(v).toLocaleString() : "—";
+        } else {
+          const v = rec.ctr;
+          return Number.isFinite(v) ? (v * 100).toFixed(2) + "%" : "—";
+        }
       }
 
       function formatValuePct(info) {
@@ -407,10 +417,11 @@
 
         if (!state.dateFromAbs) state.dateFromAbs = min;
         if (!state.dateToAbs)   state.dateToAbs   = max;
-        if (!state.dateFromA)   state.dateFromA   = min;
-        if (!state.dateToA)     state.dateToA     = max;
-        if (!state.dateFromB)   state.dateFromB   = min;
-        if (!state.dateToB)     state.dateToB     = max;
+
+        if (!state.dateFromA) state.dateFromA = min;
+        if (!state.dateToA)   state.dateToA   = max;
+        if (!state.dateFromB) state.dateFromB = min;
+        if (!state.dateToB)   state.dateToB   = max;
 
         const setBounds = (id, val) => {
           const el = document.getElementById(id);
@@ -466,34 +477,6 @@
         }
       }
 
-      function thresholdsHTML() {
-        const t = state.thresholds;
-        return `
-          <h4>% Diff Thresholds</h4>
-          <div class="th-row">
-            <b>Clicks</b>:
-            <input type="number" name="th_clicks_minClicks" value="${t.clicksMinClicks}" min="0" />
-            clicks,
-            <input type="number" name="th_clicks_minImpr" value="${t.clicksMinImpr}" min="0" />
-            impr
-          </div>
-          <div class="th-row">
-            <b>Conversions</b>:
-            <input type="number" name="th_conv_minPurch" value="${t.convMinPurch}" min="0" />
-            conv,
-            <input type="number" name="th_conv_minClicks" value="${t.convMinClicks}" min="0" />
-            clicks
-          </div>
-          <div class="th-row">
-            <b>CTR</b>:
-            <input type="number" name="th_ctr_minClicks" value="${t.ctrMinClicks}" min="0" />
-            clicks,
-            <input type="number" name="th_ctr_minImpr" value="${t.ctrMinImpr}" min="0" />
-            impr
-          </div>
-        `;
-      }
-
       function makeControl() {
         const Control = L.Control.extend({
           options: { position: "topright" },
@@ -505,9 +488,17 @@
             html += `<label><input type="radio" name="mode" value="absolute" ${state.mode === 'absolute' ? 'checked' : ''}/> Absolute</label>`;
             html += `<label><input type="radio" name="mode" value="pct" ${state.mode === 'pct' ? 'checked' : ''}/> % Difference</label>`;
             html += '<hr/><div id="time-block">' + renderTimeControlsHTML() + '</div>';
-            html += '<hr/>';
-            html += '<div id="threshold-block">' + thresholdsHTML() + '</div>';
-            html += '<div id="pct-note" class="note muted" style="display:none"></div>';
+
+            const pctInitialDisplay = state.mode === 'pct' ? '' : 'none';
+            html += `<div id="pct-controls-block" style="display:${pctInitialDisplay};">`;
+            html += '<div id="pct-note" class="note muted"></div><br>';
+            html += '<h4>% Diff Min Volume</h4>';
+            html += '<div class="date-row">';
+            html += '  <span>Min</span>';
+            html += '  <input type="number" id="thr-input" name="thr" min="0" step="1" style="width:70px" />';
+            html += '</div>';
+            html += '<div class="muted">Applies to current metric in % mode (Clicks/Conversions/CTR).</div>';
+            html += '</div>';
             html += '<hr/>';
 
             html += '<h4>Campaign</h4>';
@@ -517,7 +508,7 @@
             html += '<hr/>';
 
             html += '<h4>Metric</h4>';
-            for (const m of ["Clicks","CTR","Conversions"]) {
+            for (const m of ["Clicks","Conversions","CTR"]) {
               html += `<label><input type="radio" name="metric" value="${m}" ${state.metric === m ? 'checked' : ''}/> ${m}</label>`;
             }
             html += '<hr/>';
@@ -532,115 +523,121 @@
 
             div.innerHTML = html;
 
-            function updatePctNote() {
-              const el = div.querySelector('#pct-note');
-              if (!el) return;
-              const t = state.thresholds;
+            function updatePctUI() {
+              const note = div.querySelector('#pct-note');
+              const block = div.querySelector('#pct-controls-block');
+              const thrInput = div.querySelector('#thr-input');
+
               if (state.mode === 'pct') {
-                el.style.display = 'block';
-                el.innerHTML =
-                  '<b>NOTE: CITY SHADING IS NEUTRAL</b><br>' +
-                  'if either range has very low volume.<br>' +
-                  `Clicks: ${t.clicksMinClicks} Clicks & ${t.clicksMinImpr} Impressions in each range<br>` +
-                  `Conversions: ${t.convMinPurch} Conversions & ${t.convMinClicks} Clicks in each range<br>` +
-                  `CTR: ${t.ctrMinClicks} Clicks & ${t.ctrMinImpr} Impressions in each range`;
+                if (block) block.style.display = '';
+                const thrCfg =
+                  (state.thresholds && state.thresholds[state.metric]) ||
+                  { min: 0 };
+                if (note) {
+                  note.style.display = 'block';
+                  note.innerHTML =
+                    '<b>NOTE:</b> Shading is neutral if either range has low volume.<br>' +
+                    `Current minimum for <b>${state.metric}</b>: ${thrCfg.min}.` +
+                    (state.metric === "CTR"
+                      ? '<br>For CTR, this minimum is applied to clicks in each range.'
+                      : '');
+                }
+                if (thrInput) {
+                  thrInput.disabled = false;
+                  thrInput.value = thrCfg.min;
+                }
               } else {
-                el.style.display = 'none';
-                el.textContent = '';
+                if (block) block.style.display = 'none';
+                if (note) {
+                  note.style.display = 'none';
+                  note.textContent = '';
+                }
+                if (thrInput) {
+                  thrInput.disabled = true;
+                }
               }
             }
 
+            // After HTML is in place, sync any existing meta-driven dates
             syncAllDateInputs();
-            updatePctNote();
+            updatePctUI();
 
             div.addEventListener("change", async (e) => {
-              const name = e.target.name;
-
-              if (name === "mode") {
+              if (e.target.name === "mode") {
                 state.mode = e.target.value;
                 const tb = div.querySelector("#time-block");
                 tb.innerHTML = renderTimeControlsHTML();
                 syncAllDateInputs();
-                updatePctNote();
+                updatePctUI();
                 refreshComputationAndRedraw();
-                return;
               }
 
-              if (name === "camp") {
+              if (e.target.name === "camp") {
                 state.campaign = e.target.value;
                 refreshComputationAndRedraw();
-                return;
               }
 
-              if (name === "metric") {
+              if (e.target.name === "metric") {
                 state.metric = e.target.value;
+                updatePctUI();
                 refreshComputationAndRedraw();
-                return;
               }
 
-              if (name === "labels") {
+              if (e.target.name === "labels") {
                 state.showLabels = e.target.checked;
                 if (state.showLabels) updateLabels(); else clearLabels();
-                return;
               }
 
-              if (name === "la") {
+              if (e.target.name === "la") {
                 state.includeLA = e.target.value === "on";
-                localStorage.setItem("includeLA", state.includeLA);
+                localStorage.setItem("includeLA_time", state.includeLA);
                 await loadDataset();
-                return;
               }
 
-              // Threshold inputs
-              if (name.startsWith("th_")) {
-                const v = parseFloat(e.target.value);
-                const safeVal = Number.isFinite(v) && v >= 0 ? v : 0;
-                e.target.value = safeVal;
-
-                if (name === "th_clicks_minClicks") state.thresholds.clicksMinClicks = safeVal;
-                if (name === "th_clicks_minImpr")   state.thresholds.clicksMinImpr   = safeVal;
-                if (name === "th_conv_minPurch")    state.thresholds.convMinPurch    = safeVal;
-                if (name === "th_conv_minClicks")   state.thresholds.convMinClicks   = safeVal;
-                if (name === "th_ctr_minClicks")    state.thresholds.ctrMinClicks    = safeVal;
-                if (name === "th_ctr_minImpr")      state.thresholds.ctrMinImpr      = safeVal;
-
-                updatePctNote();
-                if (state.mode === "pct") {
-                  refreshComputationAndRedraw();
+              // Threshold input
+              if (e.target.name === "thr") {
+                const val = Number(e.target.value);
+                if (Number.isFinite(val) && val >= 0) {
+                  if (!state.thresholds[state.metric]) {
+                    state.thresholds[state.metric] = { min: val };
+                  } else {
+                    state.thresholds[state.metric].min = val;
+                  }
+                  try {
+                    localStorage.setItem("thresholds_time_v1", JSON.stringify(state.thresholds));
+                  } catch (err) {
+                    console.warn("Could not save thresholds", err);
+                  }
+                  if (state.mode === "pct") {
+                    refreshComputationAndRedraw();
+                  }
                 }
-                return;
               }
 
               // Date inputs
-              if (name === "from_date_abs") {
+              if (e.target.name === "from_date_abs") {
                 state.dateFromAbs = e.target.value || state.dateFromAbs;
                 refreshComputationAndRedraw();
-                return;
               }
-              if (name === "to_date_abs") {
+              if (e.target.name === "to_date_abs") {
                 state.dateToAbs = e.target.value || state.dateToAbs;
                 refreshComputationAndRedraw();
-                return;
               }
-              if (name === "from_date_a") {
+              if (e.target.name === "from_date_a") {
                 state.dateFromA = e.target.value || state.dateFromA;
                 refreshComputationAndRedraw();
-                return;
               }
-              if (name === "to_date_a") {
+              if (e.target.name === "to_date_a") {
                 state.dateToA = e.target.value || state.dateToA;
                 refreshComputationAndRedraw();
-                return;
               }
-              if (name === "from_date_b") {
+              if (e.target.name === "from_date_b") {
                 state.dateFromB = e.target.value || state.dateFromB;
                 refreshComputationAndRedraw();
-                return;
               }
-              if (name === "to_date_b") {
+              if (e.target.name === "to_date_b") {
                 state.dateToB = e.target.value || state.dateToB;
                 refreshComputationAndRedraw();
-                return;
               }
             });
 
@@ -679,28 +676,33 @@
         const elScale = document.getElementById("legend-scale");
 
         if (state.mode === "absolute") {
-          let [minRaw, maxRaw] =
-            state.metric === "CTR"       ? state.ranges.ctr :
-            state.metric === "Clicks"    ? state.ranges.clicks :
-                                            state.ranges.conversions;
+          let rangeKey;
+          if (state.metric === "Clicks") rangeKey = "clicks";
+          else if (state.metric === "Conversions") rangeKey = "conversions";
+          else rangeKey = "ctr";
 
-          if (state.metric !== "CTR" && minRaw <= 0) {
+          const [minRaw, maxRaw] = state.ranges[rangeKey];
+
+          let min = minRaw;
+          if (min <= 0) {
             const floor = findMinPositiveCurrent(state.metric);
-            if (Number.isFinite(floor)) minRaw = floor;
+            if (Number.isFinite(floor)) min = floor;
           }
 
-          elTitle.textContent = state.metric + (state.metric === "CTR" ? "" : " (log-scaled)");
-          elMin.textContent   = state.metric === "CTR"
-            ? (minRaw*100).toFixed(1) + "%"
-            : Math.round(minRaw).toLocaleString();
-          elMax.textContent   = state.metric === "CTR"
-            ? (maxRaw*100).toFixed(1) + "%"
-            : Math.round(maxRaw).toLocaleString();
+          elTitle.textContent = `${state.metric} (log-scaled)`;
+
+          if (state.metric === "CTR") {
+            elMin.textContent = (min * 100).toFixed(2) + "%";
+            elMax.textContent = (maxRaw * 100).toFixed(2) + "%";
+          } else {
+            elMin.textContent = Math.round(min).toLocaleString();
+            elMax.textContent = Math.round(maxRaw).toLocaleString();
+          }
 
           const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([0,1]);
           elScale.style.background = sampleGradient(scale);
         } else {
-          const [min,max] = state.ranges.pct;
+          const [min, max] = state.ranges.pct;
           elTitle.textContent = `${state.metric} % Difference`;
           elMin.textContent   = `${min.toFixed(1)}%`;
           elMax.textContent   = `${max.toFixed(1)}%`;
@@ -755,6 +757,8 @@
         state.meta  = json.meta  || {};
 
         syncAllDateInputs();
+
+        // Default: compute absolute mode aggregation
         refreshComputationAndRedraw();
 
         const geo = await fetchGzipGeoOrTopoAsGeoJSON(path("regions", "geojson.gz"));

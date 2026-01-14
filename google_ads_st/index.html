@@ -100,7 +100,8 @@
       }
 
       // ---------- state ----------
-      const CAMPAIGNS = ["ALL","Display","Search"];
+      // ✅ UPDATED: add "PMax"
+      const CAMPAIGNS = ["ALL","Display","Search","PMax"];
       const EPS = 1e-9;
 
       // Default thresholds (per metric), used to seed state / localStorage
@@ -192,7 +193,10 @@
         const dates = Object.keys(daily);
         for (const d of dates) {
           if (d < from || d > to) continue;
+
           const byCamp = daily[d] || {};
+
+          // ✅ UPDATED: iterate CAMPAIGNS including PMax, safely handling missing keys
           for (const camp of CAMPAIGNS) {
             const cityMap = byCamp[camp] || {};
             const targetCamp = aggr[camp];
@@ -479,6 +483,7 @@
             html += '<hr/>';
 
             html += '<h4>Campaign</h4>';
+            // ✅ UPDATED: CAMPAIGNS includes PMax, so it will auto-render here
             for (const c of CAMPAIGNS) {
               html += `<label><input type="radio" name="camp" value="${c}" ${state.campaign === c ? 'checked' : ''}/> ${c}</label>`;
             }

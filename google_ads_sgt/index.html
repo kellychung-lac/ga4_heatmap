@@ -164,7 +164,7 @@
 
       function baseDir() {
         // assumes you generate data_time and optionally data_time_noLA_noSD
-        return state.includeLA ? "./data_time" : "./data_time_noLA_noSD";
+        return state.includeLA ? "./data_time" : "./data_noLA_noSD_time";
       }
       function path(name, ext) {
         return `${baseDir()}/${name}.${ext}`;

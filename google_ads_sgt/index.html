@@ -98,9 +98,14 @@
       function ensureOrdered(a, b) {
         return a <= b ? [a, b] : [b, a];
       }
+      // Fallback meta derivation when meta.min_date/max_date are missing
+      function deriveMetaFromDaily(daily) {
+        const dates = Object.keys(daily || {}).sort(); // YYYY-MM-DD sorts correctly
+        if (!dates.length) return { min_date: null, max_date: null };
+        return { min_date: dates[0], max_date: dates[dates.length - 1] };
+      }
 
       // ---------- state ----------
-      // Updated to include PMax
       const CAMPAIGNS = ["ALL","Display","Search","PMax"];
       const EPS = 1e-9;
 
@@ -163,7 +168,6 @@
       };
 
       function baseDir() {
-        // assumes you generate data_time and optionally data_time_noLA_noSD
         return state.includeLA ? "./data_time" : "./data_noLA_noSD_time";
       }
       function path(name, ext) {
@@ -755,7 +759,12 @@
       async function loadDataset() {
         const json = await fetchGzipJSON(path("city_metrics", "json.gz"));
         state.daily = json.daily || {};
-        state.meta  = json.meta  || {};
+
+        // Robust meta: use file meta if present, otherwise derive from daily keys
+        state.meta = json.meta || deriveMetaFromDaily(state.daily);
+        if (!state.meta?.min_date || !state.meta?.max_date) {
+          state.meta = { ...(state.meta || {}), ...deriveMetaFromDaily(state.daily) };
+        }
 
         syncAllDateInputs();
 
@@ -763,7 +772,9 @@
         refreshComputationAndRedraw();
 
         const geo = await fetchGzipGeoOrTopoAsGeoJSON(path("regions", "geojson.gz"));
-        state.cityProp = detectCityProp(geo.features[0]);
+        const firstWithProps = geo.features.find(f => f && f.properties && Object.keys(f.properties).length) || geo.features[0];
+        state.cityProp = detectCityProp(firstWithProps);
+
         if (state.fillLayer) {
           state.map.removeLayer(state.fillLayer);
           state.fillLayer = null;

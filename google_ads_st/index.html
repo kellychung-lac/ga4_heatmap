@@ -98,15 +98,20 @@
       function ensureOrdered(a, b) {
         return a <= b ? [a, b] : [b, a];
       }
+      // Fallback meta derivation when meta.min_date/max_date are missing
+      function deriveMetaFromDaily(daily) {
+        const dates = Object.keys(daily || {}).sort(); // YYYY-MM-DD sorts correctly
+        if (!dates.length) return { min_date: null, max_date: null };
+        return { min_date: dates[0], max_date: dates[dates.length - 1] };
+      }
 
       // ---------- state ----------
-      // ✅ UPDATED: add "PMax"
       const CAMPAIGNS = ["ALL","Display","Search","PMax"];
       const EPS = 1e-9;
 
       // Default thresholds (per metric), used to seed state / localStorage
       const DEFAULT_THRESHOLDS = {
-        "Page Views":      { min: 15 },
+        "Page Views":       { min: 15 },
         "Form Conversions": { min: 1 },
       };
 
@@ -127,7 +132,7 @@
 
         daily: null,            // json.daily
         meta: null,             // json.meta {min_date, max_date}
-        aggregatedAbs: null,    // {campaign:{city:{val_pv,val_forms,...}}} for abs range
+        aggregatedAbs: null,    // {campaign:{city:{val_pv,val_forms}}} for abs range
         aggregatedFrom: null,   // same shape, pct range A
         aggregatedTo: null,     // same shape, pct range B
         pctCache: null,         // city -> {pct, from, to}
@@ -196,7 +201,6 @@
 
           const byCamp = daily[d] || {};
 
-          // ✅ UPDATED: iterate CAMPAIGNS including PMax, safely handling missing keys
           for (const camp of CAMPAIGNS) {
             const cityMap = byCamp[camp] || {};
             const targetCamp = aggr[camp];
@@ -205,9 +209,9 @@
                 targetCamp[city] = { val_pv: 0, val_forms: 0 };
               }
               const t = targetCamp[city];
-              const pv = Number(rec.val_pv)   || 0;
+              const pv = Number(rec.val_pv)    || 0;
               const fm = Number(rec.val_forms) || 0;
-              t.val_pv   += pv;
+              t.val_pv    += pv;
               t.val_forms += fm;
             }
           }
@@ -273,8 +277,8 @@
 
           let vFrom, vTo, passes;
           if (state.metric === "Page Views") {
-            vFrom = Number(recFrom.val_pv)   || 0;
-            vTo   = Number(recTo.val_pv)     || 0;
+            vFrom = Number(recFrom.val_pv) || 0;
+            vTo   = Number(recTo.val_pv)   || 0;
           } else {
             vFrom = Number(recFrom.val_forms) || 0;
             vTo   = Number(recTo.val_forms)   || 0;
@@ -483,7 +487,6 @@
             html += '<hr/>';
 
             html += '<h4>Campaign</h4>';
-            // ✅ UPDATED: CAMPAIGNS includes PMax, so it will auto-render here
             for (const c of CAMPAIGNS) {
               html += `<label><input type="radio" name="camp" value="${c}" ${state.campaign === c ? 'checked' : ''}/> ${c}</label>`;
             }
@@ -723,7 +726,12 @@
       async function loadDataset() {
         const json = await fetchGzipJSON(path("city_metrics", "json.gz"));
         state.daily = json.daily || {};
-        state.meta  = json.meta  || {};
+
+        // Robust meta: use file meta if present, otherwise derive from daily keys
+        state.meta = json.meta || deriveMetaFromDaily(state.daily);
+        if (!state.meta?.min_date || !state.meta?.max_date) {
+          state.meta = { ...(state.meta || {}), ...deriveMetaFromDaily(state.daily) };
+        }
 
         syncAllDateInputs();
 
@@ -731,7 +739,12 @@
         refreshComputationAndRedraw();
 
         const geo = await fetchGzipGeoOrTopoAsGeoJSON(path("regions", "geojson.gz"));
-        state.cityProp = detectCityProp(geo.features[0]);
+
+        // Robust city prop detection (don’t assume features[0] has props)
+        const firstWithProps =
+          geo.features.find(f => f && f.properties && Object.keys(f.properties).length) || geo.features[0];
+        state.cityProp = detectCityProp(firstWithProps);
+
         if (state.fillLayer) {
           state.map.removeLayer(state.fillLayer);
           state.fillLayer = null;
